@@ -1,0 +1,498 @@
+{
+  "Apple(Fuji)": {
+    "mape": 19.19,
+    "samples": 395
+  },
+  "Apple(Jholey)": {
+    "mape": 6.55,
+    "samples": 2683
+  },
+  "Arum": {
+    "mape": 18.64,
+    "samples": 2020
+  },
+  "Asparagus": {
+    "mape": 36.69,
+    "samples": 1055
+  },
+  "Bakula": {
+    "mape": 30.23,
+    "samples": 1131
+  },
+  "Bamboo Shoot": {
+    "mape": 15.42,
+    "samples": 2744
+  },
+  "Banana": {
+    "mape": 5.04,
+    "samples": 2744
+  },
+  "Barela": {
+    "mape": 27.99,
+    "samples": 1390
+  },
+  "Bauhania flower": {
+    "mape": 35.83,
+    "samples": 286
+  },
+  "Bitter Gourd": {
+    "mape": 152.03,
+    "samples": 2670
+  },
+  "Bottle Gourd": {
+    "mape": 116.42,
+    "samples": 2700
+  },
+  "Brd Leaf Mustard": {
+    "mape": 59.67,
+    "samples": 2742
+  },
+  "Brinjal Long": {
+    "mape": 60.48,
+    "samples": 2736
+  },
+  "Brinjal Round": {
+    "mape": 57.12,
+    "samples": 1996
+  },
+  "Brocauli": {
+    "mape": 14.49,
+    "samples": 1870
+  },
+  "Cabbage": {
+    "mape": 58.51,
+    "samples": 288
+  },
+  "Cabbage(Local)": {
+    "mape": 39.91,
+    "samples": 2749
+  },
+  "Cabbage(Terai)": {
+    "mape": 25.53,
+    "samples": 248
+  },
+  "Capsicum": {
+    "mape": 16.86,
+    "samples": 2725
+  },
+  "Carrot(Local)": {
+    "mape": 28.06,
+    "samples": 2736
+  },
+  "Carrot(Terai)": {
+    "mape": 21.48,
+    "samples": 310
+  },
+  "Cauli Local": {
+    "mape": 44.47,
+    "samples": 2750
+  },
+  "Cauli Local(Jyapu)": {
+    "mape": 90.59,
+    "samples": 331
+  },
+  "Cauli Terai": {
+    "mape": 35.23,
+    "samples": 847
+  },
+  "Celery": {
+    "mape": 19.75,
+    "samples": 2462
+  },
+  "Chilli Dry": {
+    "mape": 1.78,
+    "samples": 2748
+  },
+  "Chilli Green": {
+    "mape": 49.0,
+    "samples": 2735
+  },
+  "Chilli Green(Akbare)": {
+    "mape": 136.27,
+    "samples": 471
+  },
+  "Chilli Green(Bullet)": {
+    "mape": 22.57,
+    "samples": 541
+  },
+  "Chilli Green(Machhe)": {
+    "mape": 16.5,
+    "samples": 423
+  },
+  "Christophine": {
+    "mape": 12.6,
+    "samples": 2225
+  },
+  "Clive Dry": {
+    "mape": 40.59,
+    "samples": 1599
+  },
+  "Clive Green": {
+    "mape": 9.89,
+    "samples": 1364
+  },
+  "Coriander Green": {
+    "mape": 54.41,
+    "samples": 2741
+  },
+  "Cow pea(Long)": {
+    "mape": 33.68,
+    "samples": 2251
+  },
+  "Cowpea(Short)": {
+    "mape": 25.46,
+    "samples": 324
+  },
+  "Cress Leaf": {
+    "mape": 36.2,
+    "samples": 2609
+  },
+  "Cucumber(Hybrid)": {
+    "mape": 17.88,
+    "samples": 656
+  },
+  "Cucumber(Local)": {
+    "mape": 11.9,
+    "samples": 2686
+  },
+  "Drumstick": {
+    "mape": 27.3,
+    "samples": 366
+  },
+  "Fennel Leaf": {
+    "mape": 34.83,
+    "samples": 2377
+  },
+  "Fenugreek Leaf": {
+    "mape": 35.48,
+    "samples": 2296
+  },
+  "Fish Fresh": {
+    "mape": 8.01,
+    "samples": 2047
+  },
+  "Fish Fresh(Bachuwa)": {
+    "mape": 3.9,
+    "samples": 631
+  },
+  "Fish Fresh(Chhadi)": {
+    "mape": 2.03,
+    "samples": 631
+  },
+  "Fish Fresh(Mungari)": {
+    "mape": 11.65,
+    "samples": 629
+  },
+  "Fish Fresh(Rahu)": {
+    "mape": 4.62,
+    "samples": 629
+  },
+  "French Bean(Hybrid)": {
+    "mape": 109.26,
+    "samples": 660
+  },
+  "French Bean(Local)": {
+    "mape": 80.85,
+    "samples": 2739
+  },
+  "French Bean(Rajma)": {
+    "mape": 15.85,
+    "samples": 158
+  },
+  "Garlic Dry Chinese": {
+    "mape": 23.17,
+    "samples": 2728
+  },
+  "Garlic Dry Nepali": {
+    "mape": 73.52,
+    "samples": 2560
+  },
+  "Garlic Green": {
+    "mape": 69.65,
+    "samples": 2675
+  },
+  "Ginger": {
+    "mape": 6.41,
+    "samples": 2751
+  },
+  "Grapes(Black)": {
+    "mape": 52.23,
+    "samples": 213
+  },
+  "Grapes(Green)": {
+    "mape": 33.96,
+    "samples": 1199
+  },
+  "Green Peas": {
+    "mape": 9.83,
+    "samples": 1685
+  },
+  "Guava": {
+    "mape": 297.87,
+    "samples": 435
+  },
+  "Gundruk": {
+    "mape": 9.49,
+    "samples": 2420
+  },
+  "Jack Fruit": {
+    "mape": 14.65,
+    "samples": 1551
+  },
+  "Kinnow": {
+    "mape": 31.47,
+    "samples": 325
+  },
+  "Kiwi": {
+    "mape": 5.76,
+    "samples": 183
+  },
+  "Knolkhol": {
+    "mape": 86.46,
+    "samples": 1424
+  },
+  "Lemon": {
+    "mape": 12.0,
+    "samples": 594
+  },
+  "Lettuce": {
+    "mape": 15.96,
+    "samples": 2575
+  },
+  "Lime": {
+    "mape": 33.82,
+    "samples": 2725
+  },
+  "Litchi(Local)": {
+    "mape": 10.25,
+    "samples": 215
+  },
+  "Mandarin": {
+    "mape": 84.83,
+    "samples": 68
+  },
+  "Mango(Maldah)": {
+    "mape": 10.15,
+    "samples": 886
+  },
+  "Mint": {
+    "mape": 25.98,
+    "samples": 2634
+  },
+  "Mombin": {
+    "mape": 30.27,
+    "samples": 1701
+  },
+  "Mushroom(Button)": {
+    "mape": 34.97,
+    "samples": 683
+  },
+  "Mushroom(Kanya)": {
+    "mape": 36.32,
+    "samples": 2730
+  },
+  "Mustard Leaf": {
+    "mape": 38.84,
+    "samples": 2516
+  },
+  "Neuro": {
+    "mape": 28.34,
+    "samples": 1310
+  },
+  "Okara": {
+    "mape": 35.18,
+    "samples": 2663
+  },
+  "Onion Dry (Chinese)": {
+    "mape": 5.07,
+    "samples": 108
+  },
+  "Onion Dry (Indian)": {
+    "mape": 36.16,
+    "samples": 2742
+  },
+  "Onion Green": {
+    "mape": 43.92,
+    "samples": 2735
+  },
+  "Orange(Indian)": {
+    "mape": 12.77,
+    "samples": 273
+  },
+  "Orange(Nepali)": {
+    "mape": 7.42,
+    "samples": 1518
+  },
+  "Papaya(Indian)": {
+    "mape": 13.68,
+    "samples": 668
+  },
+  "Papaya(Nepali)": {
+    "mape": 5.97,
+    "samples": 2182
+  },
+  "Parseley": {
+    "mape": 14.53,
+    "samples": 2423
+  },
+  "Pear(Chinese)": {
+    "mape": 6.05,
+    "samples": 429
+  },
+  "Pear(Local)": {
+    "mape": 65.91,
+    "samples": 1572
+  },
+  "Pineapple": {
+    "mape": 8.0,
+    "samples": 2634
+  },
+  "Pointed Gourd(Local)": {
+    "mape": 26.13,
+    "samples": 2260
+  },
+  "Pointed Gourd(Terai)": {
+    "mape": 38.25,
+    "samples": 168
+  },
+  "Pomegranate": {
+    "mape": 7.58,
+    "samples": 2642
+  },
+  "Potato Red": {
+    "mape": 11.19,
+    "samples": 2746
+  },
+  "Potato Red(Indian)": {
+    "mape": 12.44,
+    "samples": 557
+  },
+  "Potato Red(Mude)": {
+    "mape": 13.63,
+    "samples": 253
+  },
+  "Potato White": {
+    "mape": 23.89,
+    "samples": 2381
+  },
+  "Pumpkin": {
+    "mape": 13.97,
+    "samples": 2715
+  },
+  "Raddish Red": {
+    "mape": 18.23,
+    "samples": 829
+  },
+  "Raddish White(Hybrid)": {
+    "mape": 100.74,
+    "samples": 691
+  },
+  "Raddish White(Local)": {
+    "mape": 54.52,
+    "samples": 2747
+  },
+  "Red Cabbbage": {
+    "mape": 10.75,
+    "samples": 1535
+  },
+  "Smooth Gourd": {
+    "mape": 47.08,
+    "samples": 1711
+  },
+  "Snake Gourd": {
+    "mape": 32.03,
+    "samples": 1135
+  },
+  "Soyabean Green": {
+    "mape": 40.77,
+    "samples": 1061
+  },
+  "Spinach Leaf": {
+    "mape": 13.4,
+    "samples": 2733
+  },
+  "Sponge Gourd": {
+    "mape": 251.65,
+    "samples": 788
+  },
+  "Squash(Long)": {
+    "mape": 37.87,
+    "samples": 2374
+  },
+  "Squash(Round)": {
+    "mape": 54.85,
+    "samples": 669
+  },
+  "Strawberry": {
+    "mape": 19.49,
+    "samples": 234
+  },
+  "Sugarbeet": {
+    "mape": 14.35,
+    "samples": 2618
+  },
+  "Sugarcane": {
+    "mape": 6.32,
+    "samples": 462
+  },
+  "Sweet Orange": {
+    "mape": 10.44,
+    "samples": 2556
+  },
+  "Sweet Potato": {
+    "mape": 17.9,
+    "samples": 661
+  },
+  "Sword Bean": {
+    "mape": 27.9,
+    "samples": 1342
+  },
+  "Tamarind": {
+    "mape": 7.53,
+    "samples": 2715
+  },
+  "Tofu": {
+    "mape": 14.31,
+    "samples": 2694
+  },
+  "Tomato Big(Indian)": {
+    "mape": 77.04,
+    "samples": 474
+  },
+  "Tomato Big(Nepali)": {
+    "mape": 14.59,
+    "samples": 2507
+  },
+  "Tomato Small(Indian)": {
+    "mape": 41.0,
+    "samples": 357
+  },
+  "Tomato Small(Local)": {
+    "mape": 124.25,
+    "samples": 2741
+  },
+  "Tomato Small(Terai)": {
+    "mape": 35.74,
+    "samples": 286
+  },
+  "Tomato Small(Tunnel)": {
+    "mape": 31.33,
+    "samples": 686
+  },
+  "Turnip": {
+    "mape": 48.16,
+    "samples": 420
+  },
+  "Turnip A": {
+    "mape": 13.51,
+    "samples": 2538
+  },
+  "Water Melon(Green)": {
+    "mape": 14.61,
+    "samples": 2679
+  },
+  "Yam": {
+    "mape": 14.82,
+    "samples": 1105
+  }
+}
