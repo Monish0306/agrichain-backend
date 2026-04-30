@@ -167,9 +167,21 @@ engine_kwargs = {}
 if DATABASE_URL.startswith("sqlite"):
     engine_kwargs["connect_args"] = {"check_same_thread": False}
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True, **engine_kwargs)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+# Handle both sqlite (local dev) and postgres (production)
+if DATABASE_URL.startswith("sqlite"):
+    engine_kwargs["connect_args"] = {"check_same_thread": False}
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True, **engine_kwargs)
+else:
+    # PostgreSQL with connection pool settings for Supabase free tier
+    engine = create_engine(
+        DATABASE_URL,
+        pool_pre_ping=True,
+        pool_size=2,
+        max_overflow=2,
+        pool_timeout=30,
+        pool_recycle=1800,
+        connect_args={"sslmode": "require", "connect_timeout": 10},
+    )
 
 
 def _uuid_str() -> str:
