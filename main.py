@@ -37,20 +37,161 @@ from pydantic import BaseModel, Field
 from typing import Optional
 
 # ─────────────────────────────────────────
-# SECTION 1 — IMPORTS AND SETUP
+# SECTION 1 — ENVIRONMENT & CONFIG
 # ─────────────────────────────────────────
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"), override=True)
 
-SECRET_KEY = os.getenv("SECRET_KEY", "dev_secret_key_change_me")
+SECRET_KEY = os.getenv("SECRET_KEY", "dev_secret_key_change_me_in_production")
 ALGORITHM = os.getenv("ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "")
-MONITOR_USERNAME = "agrichain_monitor" 
+MONITOR_USERNAME = "agrichain_monitor"
 MONITOR_PASSWORD = "Monitor@AgriChain2026"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ML_DIR = os.path.join(BASE_DIR, "ml_models")
+
+# ─────────────────────────────────────────
+# SECTION 2 — DATABASE SETUP
+# ─────────────────────────────────────────
+
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./agrichain.db")
+
+if DATABASE_URL.startswith("sqlite"):
+    engine = create_engine(
+        DATABASE_URL,
+        pool_pre_ping=True,
+        connect_args={"check_same_thread": False},
+    )
+else:
+    # PostgreSQL — Supabase connection pooler (port 6543)
+    engine = create_engine(
+        DATABASE_URL,
+        pool_pre_ping=True,
+        pool_size=2,
+        max_overflow=2,
+        pool_timeout=30,
+        pool_recycle=1800,
+        connect_args={"sslmode": "require", "connect_timeout": 10},
+    )
+
+# ── Base and SessionLocal MUST be defined here, before any model classes ──
+Base = declarative_base()
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+def _uuid_str() -> str:
+    return str(uuid.uuid4())
+
+
+# ─────────────────────────────────────────
+# SECTION 3 — DATABASE MODELS
+# ─────────────────────────────────────────
+
+class User(Base):
+    __tablename__ = "users"
+    id = Column(String(36), primary_key=True, default=_uuid_str)
+    phone = Column(String(32), unique=True, nullable=True, index=True)
+    email = Column(String(255), unique=True, nullable=True, index=True)
+    name = Column(String(120), nullable=False)
+    role = Column(String(20), nullable=False)
+    language = Column(String(40), nullable=False, server_default=text("'english'"))
+    state = Column(String(80), nullable=True)
+    district = Column(String(80), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    is_active = Column(Boolean, nullable=False, default=True)
+    farms = relationship("Farm", back_populates="farmer", cascade="all, delete-orphan")
+    listings = relationship("Listing", back_populates="farmer", cascade="all, delete-orphan")
+
+
+class Farm(Base):
+    __tablename__ = "farms"
+    id = Column(String(36), primary_key=True, default=_uuid_str)
+    farmer_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    gps_lat = Column(Float, nullable=False)
+    gps_lon = Column(Float, nullable=False)
+    area_acres = Column(Float, nullable=False)
+    soil_type = Column(String(80), nullable=False)
+    district = Column(String(80), nullable=False)
+    state = Column(String(80), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    farmer = relationship("User", back_populates="farms")
+    crop_records = relationship("CropRecord", back_populates="farm", cascade="all, delete-orphan")
+
+
+class Listing(Base):
+    __tablename__ = "listings"
+    id = Column(String(36), primary_key=True, default=_uuid_str)
+    farmer_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    crop_type = Column(String(80), nullable=False, index=True)
+    quantity_kg = Column(Float, nullable=False)
+    asking_price = Column(Float, nullable=False)
+    quality_grade = Column(String(2), nullable=False)
+    description = Column(String(500), nullable=True)
+    location_lat = Column(Float, nullable=True)
+    location_lon = Column(Float, nullable=True)
+    district = Column(String(80), nullable=False, index=True)
+    state = Column(String(80), nullable=False, index=True)
+    status = Column(String(20), nullable=False, server_default=text("'active'"))
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    farmer = relationship("User", back_populates="listings")
+    transactions = relationship("Transaction", back_populates="listing", cascade="all, delete-orphan")
+
+
+class Transaction(Base):
+    __tablename__ = "transactions"
+    id = Column(String(36), primary_key=True, default=_uuid_str)
+    listing_id = Column(String(36), ForeignKey("listings.id"), nullable=False, index=True)
+    farmer_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    merchant_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    agreed_price = Column(Float, nullable=False)
+    quantity_kg = Column(Float, nullable=False)
+    status = Column(String(30), nullable=False, server_default=text("'pending'"))
+    blockchain_tx_hash = Column(String(120), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    listing = relationship("Listing", back_populates="transactions")
+
+
+class CropRecord(Base):
+    __tablename__ = "crop_records"
+    id = Column(String(36), primary_key=True, default=_uuid_str)
+    farm_id = Column(String(36), ForeignKey("farms.id"), nullable=False, index=True)
+    crop_type = Column(String(80), nullable=False)
+    planting_date = Column(DateTime(timezone=True), nullable=False)
+    expected_harvest = Column(DateTime(timezone=True), nullable=True)
+    notes = Column(String(500), nullable=True)
+    farm = relationship("Farm", back_populates="crop_records")
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+# ─────────────────────────────────────────
+# SECTION 4 — ML MODEL LOADING
+# ─────────────────────────────────────────
 
 # Global model variables
 crop_model = None
@@ -76,7 +217,7 @@ def _safe_joblib_load(path: str, label: str):
         print(f"  [OK] Loaded {label}")
         return obj
     except Exception as e:
-        print(f"  [ERROR] Failed to load {label}: {e}")
+        print(f"  [WARN] Could not load {label}: {e}")
         return None
 
 
@@ -87,7 +228,7 @@ def _safe_pickle_load(path: str, label: str):
         print(f"  [OK] Loaded {label}")
         return obj
     except Exception as e:
-        print(f"  [ERROR] Failed to load {label}: {e}")
+        print(f"  [WARN] Could not load {label}: {e}")
         return None
 
 
@@ -101,17 +242,29 @@ def load_ml_artifacts():
 
     # ── Crop models ──
     crop_model = _safe_joblib_load(os.path.join(ML_DIR, "crop_model.pkl"), "crop_model")
-    crop_label_encoder = _safe_joblib_load(os.path.join(ML_DIR, "crop_label_encoder.pkl"), "crop_label_encoder")
+    crop_label_encoder = _safe_joblib_load(
+        os.path.join(ML_DIR, "crop_label_encoder.pkl"), "crop_label_encoder"
+    )
     crop_scaler = _safe_joblib_load(os.path.join(ML_DIR, "crop_scaler.pkl"), "crop_scaler")
 
     # ── Fertilizer models ──
-    fertilizer_model = _safe_joblib_load(os.path.join(ML_DIR, "fertilizer_model.pkl"), "fertilizer_model")
-    fertilizer_label_encoder = _safe_joblib_load(os.path.join(ML_DIR, "fertilizer_label_encoder.pkl"), "fertilizer_label_encoder")
-    soil_type_encoder = _safe_joblib_load(os.path.join(ML_DIR, "soil_type_encoder.pkl"), "soil_type_encoder")
-    crop_type_encoder = _safe_joblib_load(os.path.join(ML_DIR, "crop_type_encoder.pkl"), "crop_type_encoder")
-    fertilizer_scaler = _safe_joblib_load(os.path.join(ML_DIR, "fertilizer_scaler.pkl"), "fertilizer_scaler")
+    fertilizer_model = _safe_joblib_load(
+        os.path.join(ML_DIR, "fertilizer_model.pkl"), "fertilizer_model"
+    )
+    fertilizer_label_encoder = _safe_joblib_load(
+        os.path.join(ML_DIR, "fertilizer_label_encoder.pkl"), "fertilizer_label_encoder"
+    )
+    soil_type_encoder = _safe_joblib_load(
+        os.path.join(ML_DIR, "soil_type_encoder.pkl"), "soil_type_encoder"
+    )
+    crop_type_encoder = _safe_joblib_load(
+        os.path.join(ML_DIR, "crop_type_encoder.pkl"), "crop_type_encoder"
+    )
+    fertilizer_scaler = _safe_joblib_load(
+        os.path.join(ML_DIR, "fertilizer_scaler.pkl"), "fertilizer_scaler"
+    )
 
-    # ── Price models — scan BOTH ml_models/ AND ml_models/price_models/ ──
+    # ── Price models — scan ml_models/ AND ml_models/price_models/ ──
     price_models = {}
     scan_dirs = [ML_DIR, os.path.join(ML_DIR, "price_models")]
 
@@ -137,12 +290,12 @@ def load_ml_artifacts():
                 available_commodities = [str(x).strip() for x in ac if str(x).strip()]
             break
 
-    # If available_commodities is empty, derive from loaded price models
+    # Fallback: derive from loaded price models
     if not available_commodities and price_models:
         available_commodities = list(price_models.keys())
 
     print(f"\n[STARTUP] Price models loaded: {len(price_models)} commodities")
-    print(f"[STARTUP] Available commodities: {list(price_models.keys())}")
+    print(f"[STARTUP] Commodities: {sorted(price_models.keys())}")
 
 
 def load_schemes():
@@ -155,147 +308,39 @@ def load_schemes():
         print(f"[STARTUP] Loaded {len(schemes_data)} government schemes")
     except Exception as e:
         schemes_data = []
-        print(f"[STARTUP ERROR] Failed to load schemes.json: {e}")
+        print(f"[STARTUP WARN] Failed to load schemes.json: {e}")
 
 
 # ─────────────────────────────────────────
-# SECTION 2 — DATABASE
-# ─────────────────────────────────────────
-
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./agrichain.db")
-engine_kwargs = {}
-if DATABASE_URL.startswith("sqlite"):
-    engine_kwargs["connect_args"] = {"check_same_thread": False}
-
-# Handle both sqlite (local dev) and postgres (production)
-if DATABASE_URL.startswith("sqlite"):
-    engine_kwargs["connect_args"] = {"check_same_thread": False}
-    engine = create_engine(DATABASE_URL, pool_pre_ping=True, **engine_kwargs)
-else:
-    # PostgreSQL with connection pool settings for Supabase free tier
-    engine = create_engine(
-        DATABASE_URL,
-        pool_pre_ping=True,
-        pool_size=2,
-        max_overflow=2,
-        pool_timeout=30,
-        pool_recycle=1800,
-        connect_args={"sslmode": "require", "connect_timeout": 10},
-    )
-
-
-def _uuid_str() -> str:
-    return str(uuid.uuid4())
-
-
-class User(Base):
-    __tablename__ = "users"
-    id = Column(String(36), primary_key=True, default=_uuid_str)
-    phone = Column(String(32), unique=True, nullable=True, index=True)
-    email = Column(String(255), unique=True, nullable=True, index=True)
-    name = Column(String(120), nullable=False)
-    role = Column(String(20), nullable=False)
-    language = Column(String(40), nullable=False, server_default=text("'tamil'"))
-    state = Column(String(80), nullable=True)
-    district = Column(String(80), nullable=True)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
-    is_active = Column(Boolean, nullable=False, default=True)
-    farms = relationship("Farm", back_populates="farmer", cascade="all, delete-orphan")
-    listings = relationship("Listing", back_populates="farmer", cascade="all, delete-orphan")
-
-
-class Farm(Base):
-    __tablename__ = "farms"
-    id = Column(String(36), primary_key=True, default=_uuid_str)
-    farmer_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
-    gps_lat = Column(Float, nullable=False)
-    gps_lon = Column(Float, nullable=False)
-    area_acres = Column(Float, nullable=False)
-    soil_type = Column(String(80), nullable=False)
-    district = Column(String(80), nullable=False)
-    state = Column(String(80), nullable=False)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
-    farmer = relationship("User", back_populates="farms")
-    crop_records = relationship("CropRecord", back_populates="farm", cascade="all, delete-orphan")
-
-
-class Listing(Base):
-    __tablename__ = "listings"
-    id = Column(String(36), primary_key=True, default=_uuid_str)
-    farmer_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
-    crop_type = Column(String(80), nullable=False, index=True)
-    quantity_kg = Column(Float, nullable=False)
-    asking_price = Column(Float, nullable=False)
-    quality_grade = Column(String(2), nullable=False)
-    description = Column(String(500), nullable=True)
-    location_lat = Column(Float, nullable=True)
-    location_lon = Column(Float, nullable=True)
-    district = Column(String(80), nullable=False, index=True)
-    state = Column(String(80), nullable=False, index=True)
-    status = Column(String(20), nullable=False, server_default=text("'active'"))
-    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
-    farmer = relationship("User", back_populates="listings")
-    transactions = relationship("Transaction", back_populates="listing", cascade="all, delete-orphan")
-
-
-class Transaction(Base):
-    __tablename__ = "transactions"
-    id = Column(String(36), primary_key=True, default=_uuid_str)
-    listing_id = Column(String(36), ForeignKey("listings.id"), nullable=False, index=True)
-    farmer_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
-    merchant_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
-    agreed_price = Column(Float, nullable=False)
-    quantity_kg = Column(Float, nullable=False)
-    status = Column(String(30), nullable=False, server_default=text("'pending'"))
-    blockchain_tx_hash = Column(String(120), nullable=True)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
-    completed_at = Column(DateTime(timezone=True), nullable=True)
-    listing = relationship("Listing", back_populates="transactions")
-
-
-class CropRecord(Base):
-    __tablename__ = "crop_records"
-    id = Column(String(36), primary_key=True, default=_uuid_str)
-    farm_id = Column(String(36), ForeignKey("farms.id"), nullable=False, index=True)
-    crop_type = Column(String(80), nullable=False)
-    planting_date = Column(DateTime(timezone=True), nullable=False)
-    expected_harvest = Column(DateTime(timezone=True), nullable=True)
-    notes = Column(String(500), nullable=True)
-    farm = relationship("Farm", back_populates="crop_records")
-
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-# ─────────────────────────────────────────
-# SECTION 3 — AUTH HELPERS
+# SECTION 5 — AUTH HELPERS
 # ─────────────────────────────────────────
 
 security = HTTPBearer(auto_error=False)
 
 
-def create_access_token(data: dict, role: str):
+def create_access_token(data: dict, role: str) -> str:
     to_encode = dict(data)
     expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire, "role": role})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
-def verify_token(token: str):
+def verify_token(token: str) -> dict:
     try:
         return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
     except Exception:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+        )
 
 
 def _extract_token(credentials: HTTPAuthorizationCredentials) -> str:
     if credentials is None or credentials.scheme.lower() != "bearer":
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing Bearer token")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing Bearer token",
+        )
     token = credentials.credentials
     if isinstance(token, str):
         token = token.strip().strip('"').strip("'")
@@ -307,24 +352,35 @@ def _extract_token(credentials: HTTPAuthorizationCredentials) -> str:
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db),
-):
+) -> User:
     token = _extract_token(credentials)
     payload = verify_token(token)
     user_id = payload.get("sub")
     if not user_id:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token payload",
+        )
     user = db.query(User).filter(User.id == str(user_id)).first()
     if not user or not user.is_active:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found or inactive",
+        )
     return user
 
 
-def _role_from_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
+def _role_from_token(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+) -> str:
     token = _extract_token(credentials)
     payload = verify_token(token)
     role = payload.get("role")
     if not role:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token payload",
+        )
     return str(role)
 
 
@@ -344,14 +400,14 @@ def require_monitor(role: str = Depends(_role_from_token)):
 
 
 # ─────────────────────────────────────────
-# SECTION 10 — APP SETUP (defined early so routes work)
+# SECTION 6 — FASTAPI APP
 # ─────────────────────────────────────────
 
 limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(
     title="AgriChain Intelligence Platform",
     version="1.0.0",
-    description="AI-powered agriculture platform for Indian farmers",
+    description="AI-powered agriculture platform for Indian farmers — Crop Advisory, Marketplace, Price Intelligence, Finance",
 )
 app.state.limiter = limiter
 app.add_middleware(SlowAPIMiddleware)
@@ -366,7 +422,10 @@ app.add_middleware(
 
 @app.exception_handler(RateLimitExceeded)
 def rate_limit_handler(request: Request, exc: RateLimitExceeded):
-    return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded. Try again in a minute."})
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "Rate limit exceeded. Please try again in a minute."},
+    )
 
 
 @app.exception_handler(404)
@@ -381,11 +440,18 @@ def server_error_handler(request: Request, exc):
 
 @app.on_event("startup")
 def on_startup():
+    # Create all DB tables
     Base.metadata.create_all(bind=engine)
+    # Load ML artifacts
     load_ml_artifacts()
+    # Load government schemes
     load_schemes()
-    print("\n[STARTUP] AgriChain backend ready. Visit /docs to test all endpoints.\n")
+    print("\n[STARTUP] ✅ AgriChain backend ready. Visit /docs to explore all endpoints.\n")
 
+
+# ─────────────────────────────────────────
+# SECTION 7 — HEALTH & DEBUG ENDPOINTS
+# ─────────────────────────────────────────
 
 @app.get("/", tags=["Health"])
 def root():
@@ -394,29 +460,21 @@ def root():
         "version": "1.0.0",
         "status": "running",
         "docs_url": "/docs",
-        "price_models_loaded": len(price_models),
         "crop_model_loaded": crop_model is not None,
         "fertilizer_model_loaded": fertilizer_model is not None,
+        "price_models_loaded": len(price_models),
+        "schemes_loaded": len(schemes_data),
     }
 
 
 @app.get("/health", tags=["Health"])
 def health():
-    return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
-
-@app.get("/api/debug/monitor-check", tags=["Debug"])
-def debug_monitor():
     return {
-        "MONITOR_USERNAME": repr(MONITOR_USERNAME),
-        "MONITOR_PASSWORD": repr(MONITOR_PASSWORD),
-        "username_length": len(MONITOR_USERNAME),
-        "password_length": len(MONITOR_PASSWORD),
-        "env_file_exists": os.path.exists(os.path.join(BASE_DIR, ".env"))
+        "status": "healthy",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "database": "connected",
     }
 
-# ─────────────────────────────────────────
-# DEBUG ENDPOINT (remove before production)
-# ─────────────────────────────────────────
 
 @app.get("/api/debug/models", tags=["Debug"])
 def debug_models():
@@ -425,11 +483,10 @@ def debug_models():
     files_sub = os.listdir(price_subdir) if os.path.isdir(price_subdir) else []
     return {
         "ml_dir": ML_DIR,
-        "files_in_ml_models": files_main,
-        "files_in_price_models_subfolder": files_sub,
-        "price_files_found": [f for f in files_main + files_sub if f.startswith("price_")],
-        "loaded_price_models": list(price_models.keys()),
-        "available_commodities": available_commodities,
+        "files_in_ml_models": sorted(files_main),
+        "files_in_price_models_subfolder": sorted(files_sub),
+        "loaded_price_models": sorted(price_models.keys()),
+        "available_commodities": sorted(available_commodities),
         "crop_model_loaded": crop_model is not None,
         "fertilizer_model_loaded": fertilizer_model is not None,
         "schemes_loaded": len(schemes_data),
@@ -437,23 +494,23 @@ def debug_models():
 
 
 # ─────────────────────────────────────────
-# SECTION 4 — AUTH ENDPOINTS
+# SECTION 8 — AUTH ENDPOINTS
 # ─────────────────────────────────────────
 
 class FarmerLoginRequest(BaseModel):
-    phone: str
-    name: str
+    phone: str = Field(..., example="9876543210")
+    name: str = Field(..., example="Ravi Kumar")
 
 
 class MerchantLoginRequest(BaseModel):
-    email: str
-    password: str
-    name: str
+    email: str = Field(..., example="merchant@example.com")
+    password: str = Field(..., example="Password@123")
+    name: str = Field(..., example="Amit Traders")
 
 
 class MonitorLoginRequest(BaseModel):
-    username: str
-    password: str
+    username: str = Field(..., example="agrichain_monitor")
+    password: str = Field(..., example="Monitor@AgriChain2026")
 
 
 @app.post("/api/auth/farmer/login", tags=["Auth"])
@@ -471,13 +528,22 @@ def farmer_login(payload: FarmerLoginRequest, db: Session = Depends(get_db)):
         db.refresh(user)
     else:
         if user.role != "farmer":
-            raise HTTPException(status_code=400, detail="Phone already registered with a different role")
+            raise HTTPException(
+                status_code=400,
+                detail="Phone already registered with a different role",
+            )
         if user.name != name:
             user.name = name
             db.commit()
 
     token = create_access_token({"sub": user.id, "name": user.name}, role="farmer")
-    return {"access_token": token, "token_type": "bearer", "user_id": user.id, "name": user.name, "role": user.role}
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user_id": user.id,
+        "name": user.name,
+        "role": user.role,
+    }
 
 
 @app.post("/api/auth/merchant/login", tags=["Auth"])
@@ -496,7 +562,10 @@ def merchant_login(payload: MerchantLoginRequest, db: Session = Depends(get_db))
         db.refresh(user)
     else:
         if user.role != "merchant":
-            raise HTTPException(status_code=400, detail="Email already registered with a different role")
+            raise HTTPException(
+                status_code=400,
+                detail="Email already registered with a different role",
+            )
         if user.name != name:
             user.name = name
             db.commit()
@@ -510,55 +579,67 @@ def merchant_login(payload: MerchantLoginRequest, db: Session = Depends(get_db))
             raise HTTPException(status_code=401, detail="Invalid credentials")
 
     token = create_access_token({"sub": user.id, "name": user.name}, role="merchant")
-    return {"access_token": token, "token_type": "bearer", "user_id": user.id, "name": user.name, "role": user.role}
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user_id": user.id,
+        "name": user.name,
+        "role": user.role,
+    }
 
 
 @app.post("/api/auth/monitor/login", tags=["Auth"])
 @limiter.limit("5/minute")
 def monitor_login(request: Request, payload: MonitorLoginRequest):
-    # Use the global constants loaded at startup — do NOT call os.getenv() here again
     if payload.username.strip() != MONITOR_USERNAME or payload.password.strip() != MONITOR_PASSWORD:
         raise HTTPException(status_code=401, detail="Invalid credentials")
     token = create_access_token(
         {"sub": f"monitor:{payload.username}", "name": payload.username},
-        role="monitor"
+        role="monitor",
     )
     return {
         "access_token": token,
         "token_type": "bearer",
         "user_id": f"monitor:{payload.username}",
         "name": payload.username,
-        "role": "monitor"
+        "role": "monitor",
     }
 
 
 @app.get("/api/auth/me", tags=["Auth"])
 def me(user: User = Depends(get_current_user)):
     return {
-        "id": user.id, "phone": user.phone, "email": user.email,
-        "name": user.name, "role": user.role, "language": user.language,
-        "state": user.state, "district": user.district,
-        "created_at": user.created_at, "is_active": user.is_active,
+        "id": user.id,
+        "phone": user.phone,
+        "email": user.email,
+        "name": user.name,
+        "role": user.role,
+        "language": user.language,
+        "state": user.state,
+        "district": user.district,
+        "created_at": user.created_at,
+        "is_active": user.is_active,
     }
 
 
 # ─────────────────────────────────────────
-# SECTION 5 — ADVISORY ENDPOINTS
+# SECTION 9 — ADVISORY ENDPOINTS
 # ─────────────────────────────────────────
 
-# These are the EXACT soil types your model was trained on
 VALID_SOIL_TYPES = {"Black", "Clayey", "Loamy", "Red", "Sandy"}
 
 SOIL_TYPES_INFO = [
     {"name": "Black", "description": "Clay-rich soils with high moisture retention. Best for cotton, sugarcane, wheat."},
     {"name": "Clayey", "description": "Heavy soils with good water retention. Suitable for rice and pulses."},
-    {"name": "Loamy", "description": "Best all-purpose soil. Suitable for almost all crops including vegetables and cereals."},
-    {"name": "Red", "description": "Iron-rich well-drained soils. Good for groundnut, millets, tobacco, oilseeds."},
-    {"name": "Sandy", "description": "Light fast-draining soils. Suitable for groundnut, sweet potato, millets with irrigation."},
+    {"name": "Loamy", "description": "Best all-purpose soil. Suitable for almost all crops."},
+    {"name": "Red", "description": "Iron-rich well-drained soils. Good for groundnut, millets, oilseeds."},
+    {"name": "Sandy", "description": "Light fast-draining soils. Suitable for groundnut, sweet potato, millets."},
 ]
 
-# These are the EXACT crop types your fertilizer model was trained on
-VALID_CROP_TYPES = {"Barley", "Cotton", "Ground Nuts", "Maize", "Millets", "Oil seeds", "Paddy", "Pulses", "Sugarcane", "Tobacco", "Wheat"}
+VALID_CROP_TYPES = {
+    "Barley", "Cotton", "Ground Nuts", "Maize", "Millets",
+    "Oil seeds", "Paddy", "Pulses", "Sugarcane", "Tobacco", "Wheat",
+}
 
 CROP_NAMES_22 = [
     "Rice", "Maize", "Chickpea", "Kidney Beans", "Pigeon Peas", "Moth Beans",
@@ -579,52 +660,52 @@ WATER_REQUIREMENT_MM = {
 
 class AdvisoryRecommendRequest(BaseModel):
     nitrogen: float = Field(..., example=90, description="Nitrogen content in soil (kg/ha)")
-    phosphorous: float = Field(..., example=42, description="Phosphorous content in soil (kg/ha)")
-    potassium: float = Field(..., example=43, description="Potassium content in soil (kg/ha)")
+    phosphorous: float = Field(..., example=42, description="Phosphorous content (kg/ha)")
+    potassium: float = Field(..., example=43, description="Potassium content (kg/ha)")
     temperature: float = Field(..., example=25.0, description="Temperature in Celsius")
     humidity: float = Field(..., example=65.0, description="Humidity percentage (0-100)")
     ph: float = Field(..., example=6.5, description="Soil pH value (0-14)")
     rainfall: float = Field(..., example=200.0, description="Annual rainfall in mm")
     soil_type: str = Field(..., example="Loamy", description="One of: Black, Clayey, Loamy, Red, Sandy")
     crop_type: str = Field("Wheat", example="Wheat", description="One of: Barley, Cotton, Ground Nuts, Maize, Millets, Oil seeds, Paddy, Pulses, Sugarcane, Tobacco, Wheat")
-    gps_lat: float = Field(12.97, example=12.97, description="GPS latitude for weather lookup")
-    gps_lon: float = Field(77.59, example=77.59, description="GPS longitude for weather lookup")
+    gps_lat: float = Field(12.97, example=12.97)
+    gps_lon: float = Field(77.59, example=77.59)
     language: str = Field("english", example="english")
 
 
 @app.post("/api/advisory/recommend", tags=["Advisory"], dependencies=[Depends(require_farmer)])
 def recommend(payload: AdvisoryRecommendRequest, user: User = Depends(get_current_user)):
     if crop_model is None or crop_label_encoder is None or crop_scaler is None:
-        raise HTTPException(status_code=503, detail="Crop recommendation model not loaded. Check ml_models/ folder.")
+        raise HTTPException(
+            status_code=503,
+            detail="Crop recommendation model not loaded. Check ml_models/ folder.",
+        )
     if fertilizer_model is None or soil_type_encoder is None or crop_type_encoder is None or fertilizer_scaler is None:
-        raise HTTPException(status_code=503, detail="Fertilizer model not loaded. Check ml_models/ folder.")
+        raise HTTPException(
+            status_code=503,
+            detail="Fertilizer model not loaded. Check ml_models/ folder.",
+        )
 
     soil_type = payload.soil_type.strip()
     crop_type = payload.crop_type.strip()
 
-    # Validate soil_type
     if soil_type not in VALID_SOIL_TYPES:
         raise HTTPException(
             status_code=400,
             detail={
                 "message": f"Invalid soil_type: '{soil_type}'",
                 "valid_options": sorted(VALID_SOIL_TYPES),
-                "hint": "Use exactly one of these values — they are case-sensitive"
-            }
+                "hint": "Values are case-sensitive",
+            },
         )
 
-    # Validate crop_type for fertilizer model
-    if crop_type not in VALID_CROP_TYPES:
-        # Use a safe default instead of crashing
-        crop_type_for_fertilizer = "Wheat"
-    else:
-        crop_type_for_fertilizer = crop_type
+    crop_type_for_fertilizer = crop_type if crop_type in VALID_CROP_TYPES else "Wheat"
 
     # ── Crop recommendation ──
     try:
         features = np.array([[
             payload.nitrogen, payload.phosphorous, payload.potassium,
-            payload.temperature, payload.humidity, payload.ph, payload.rainfall
+            payload.temperature, payload.humidity, payload.ph, payload.rainfall,
         ]], dtype=float)
         scaled = crop_scaler.transform(features)
         proba = crop_model.predict_proba(scaled)[0]
@@ -649,16 +730,20 @@ def recommend(payload: AdvisoryRecommendRequest, user: User = Depends(get_curren
         fert_features = np.array([[
             payload.temperature, payload.humidity, payload.ph,
             soil_enc, crop_enc,
-            payload.nitrogen, payload.potassium, payload.phosphorous
+            payload.nitrogen, payload.potassium, payload.phosphorous,
         ]], dtype=float)
         fert_scaled = fertilizer_scaler.transform(fert_features)
         fert_pred = fertilizer_model.predict(fert_scaled)
         fert_name = fertilizer_label_encoder.inverse_transform(fert_pred)[0]
         fertilizer_recommendation = {"name": str(fert_name), "dosage_kg_per_acre": 50}
     except Exception as e:
-        fertilizer_recommendation = {"name": "DAP (Default)", "dosage_kg_per_acre": 50, "note": f"Model error: {e}"}
+        fertilizer_recommendation = {
+            "name": "DAP (Default)",
+            "dosage_kg_per_acre": 50,
+            "note": f"Model error: {e}",
+        }
 
-    # ── Weather alerts (OpenWeatherMap) ──
+    # ── Weather from OpenWeatherMap ──
     weather_out = {"temp": None, "humidity": None, "description": None}
     try:
         if OPENWEATHER_API_KEY:
@@ -678,23 +763,39 @@ def recommend(payload: AdvisoryRecommendRequest, user: User = Depends(get_curren
     except Exception as e:
         weather_out = {"temp": None, "humidity": None, "description": f"Unavailable: {e}"}
 
+    # ── Farming alerts ──
     farming_alerts = []
     h = weather_out.get("humidity") or payload.humidity
     t = weather_out.get("temp") or payload.temperature
-    if h and h > 80:
-        farming_alerts.append({"message": "High humidity — elevated fungal disease risk. Consider protective spray.", "severity": "warning"})
-    if t and t > 40:
-        farming_alerts.append({"message": "Extreme heat — risk of heat stress. Irrigate in early morning.", "severity": "critical"})
-    if t and t < 10:
-        farming_alerts.append({"message": "Low temperature — possible frost risk. Protect young seedlings.", "severity": "warning"})
+    if h and float(h) > 80:
+        farming_alerts.append({
+            "message": "High humidity — elevated fungal disease risk. Consider protective spray.",
+            "severity": "warning",
+        })
+    if t and float(t) > 40:
+        farming_alerts.append({
+            "message": "Extreme heat — risk of heat stress. Irrigate in early morning.",
+            "severity": "critical",
+        })
+    if t and float(t) < 10:
+        farming_alerts.append({
+            "message": "Low temperature — possible frost risk. Protect young seedlings.",
+            "severity": "warning",
+        })
 
     best_crop = recommended_crops[0]["name"] if recommended_crops else "your crop"
+    fert = fertilizer_recommendation["name"]
+    dosage = fertilizer_recommendation["dosage_kg_per_acre"]
+
     return {
         "recommended_crops": recommended_crops,
         "fertilizer_recommendation": fertilizer_recommendation,
         "weather": weather_out,
         "farming_alerts": farming_alerts,
-        "advice_summary": f"Based on your soil and climate, {best_crop} is your best option. Apply {fertilizer_recommendation['name']} at {fertilizer_recommendation['dosage_kg_per_acre']} kg/acre.",
+        "advice_summary": (
+            f"Based on your soil and climate, {best_crop} is your best option. "
+            f"Apply {fert} at {dosage} kg/acre for optimal yield."
+        ),
     }
 
 
@@ -705,16 +806,22 @@ def advisory_crops():
 
 @app.get("/api/advisory/soil-types", tags=["Advisory"])
 def advisory_soil_types():
-    return {"soil_types": SOIL_TYPES_INFO, "valid_values_for_api": sorted(VALID_SOIL_TYPES)}
+    return {
+        "soil_types": SOIL_TYPES_INFO,
+        "valid_values_for_api": sorted(VALID_SOIL_TYPES),
+    }
 
 
 @app.get("/api/advisory/crop-types-for-fertilizer", tags=["Advisory"])
 def advisory_crop_types():
-    return {"crop_types": sorted(VALID_CROP_TYPES), "note": "Use these exact values for crop_type in /recommend"}
+    return {
+        "crop_types": sorted(VALID_CROP_TYPES),
+        "note": "Use these exact values for crop_type in /recommend",
+    }
 
 
 # ─────────────────────────────────────────
-# SECTION 6 — MARKETPLACE ENDPOINTS
+# SECTION 10 — MARKETPLACE ENDPOINTS
 # ─────────────────────────────────────────
 
 class CreateListingRequest(BaseModel):
@@ -730,7 +837,11 @@ class CreateListingRequest(BaseModel):
 
 
 @app.post("/api/marketplace/listings", tags=["Marketplace"], dependencies=[Depends(require_farmer)])
-def create_listing(payload: CreateListingRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def create_listing(
+    payload: CreateListingRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     grade = payload.quality_grade.strip().upper()
     if grade not in ("A", "B", "C"):
         raise HTTPException(status_code=400, detail="quality_grade must be A, B, or C")
@@ -761,7 +872,11 @@ def list_listings(
     state: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
-    q = db.query(Listing, User).join(User, Listing.farmer_id == User.id).filter(Listing.status == "active")
+    q = (
+        db.query(Listing, User)
+        .join(User, Listing.farmer_id == User.id)
+        .filter(Listing.status == "active")
+    )
     if crop_type:
         q = q.filter(Listing.crop_type == crop_type)
     if district:
@@ -779,10 +894,12 @@ def list_listings(
 
 @app.get("/api/marketplace/listings/{listing_id}", tags=["Marketplace"])
 def get_listing(listing_id: str, db: Session = Depends(get_db)):
-    row = (db.query(Listing, User)
-           .join(User, Listing.farmer_id == User.id)
-           .filter(Listing.id == listing_id)
-           .first())
+    row = (
+        db.query(Listing, User)
+        .join(User, Listing.farmer_id == User.id)
+        .filter(Listing.id == listing_id)
+        .first()
+    )
     if not row:
         raise HTTPException(status_code=404, detail="Listing not found")
     listing, farmer = row
@@ -793,16 +910,26 @@ def get_listing(listing_id: str, db: Session = Depends(get_db)):
 
 class PlaceOrderRequest(BaseModel):
     quantity_kg: float = Field(..., example=100.0)
-    offered_price: float = Field(..., example=20.0, description="Price per kg offered in INR")
+    offered_price: float = Field(..., example=20.0, description="Price per kg in INR")
 
 
 @app.post("/api/marketplace/listings/{listing_id}/order", tags=["Marketplace"], dependencies=[Depends(require_merchant)])
-def create_order(listing_id: str, payload: PlaceOrderRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    listing = db.query(Listing).filter(Listing.id == listing_id, Listing.status == "active").first()
+def create_order(
+    listing_id: str,
+    payload: PlaceOrderRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    listing = db.query(Listing).filter(
+        Listing.id == listing_id, Listing.status == "active"
+    ).first()
     if not listing:
         raise HTTPException(status_code=404, detail="Listing not found or not active")
     if payload.quantity_kg <= 0 or payload.offered_price <= 0:
-        raise HTTPException(status_code=400, detail="quantity_kg and offered_price must be positive")
+        raise HTTPException(
+            status_code=400,
+            detail="quantity_kg and offered_price must be positive",
+        )
 
     tx = Transaction(
         listing_id=listing.id,
@@ -820,14 +947,20 @@ def create_order(listing_id: str, payload: PlaceOrderRequest, user: User = Depen
 
 
 @app.post("/api/marketplace/transactions/{transaction_id}/confirm", tags=["Marketplace"])
-def confirm_transaction(transaction_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def confirm_transaction(
+    transaction_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     if not tx:
         raise HTTPException(status_code=404, detail="Transaction not found")
     if user.role not in ("farmer", "merchant"):
         raise HTTPException(status_code=403, detail="Farmer or Merchant role required")
 
-    confirmations = TRANSACTION_CONFIRMATIONS.setdefault(transaction_id, {"farmer": False, "merchant": False})
+    confirmations = TRANSACTION_CONFIRMATIONS.setdefault(
+        transaction_id, {"farmer": False, "merchant": False}
+    )
     if user.role == "farmer":
         if user.id != tx.farmer_id:
             raise HTTPException(status_code=403, detail="Not your transaction")
@@ -850,14 +983,32 @@ def confirm_transaction(transaction_id: str, user: User = Depends(get_current_us
 
 @app.get("/api/marketplace/my-listings", tags=["Marketplace"], dependencies=[Depends(require_farmer)])
 def my_listings(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    rows = db.query(Listing).filter(Listing.farmer_id == user.id).order_by(Listing.created_at.desc()).all()
-    return {"listings": [{k: v for k, v in r.__dict__.items() if not k.startswith("_")} for r in rows]}
+    rows = (
+        db.query(Listing)
+        .filter(Listing.farmer_id == user.id)
+        .order_by(Listing.created_at.desc())
+        .all()
+    )
+    return {
+        "listings": [
+            {k: v for k, v in r.__dict__.items() if not k.startswith("_")} for r in rows
+        ]
+    }
 
 
 @app.get("/api/marketplace/my-orders", tags=["Marketplace"], dependencies=[Depends(require_merchant)])
 def my_orders(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    rows = db.query(Transaction).filter(Transaction.merchant_id == user.id).order_by(Transaction.created_at.desc()).all()
-    return {"transactions": [{k: v for k, v in r.__dict__.items() if not k.startswith("_")} for r in rows]}
+    rows = (
+        db.query(Transaction)
+        .filter(Transaction.merchant_id == user.id)
+        .order_by(Transaction.created_at.desc())
+        .all()
+    )
+    return {
+        "transactions": [
+            {k: v for k, v in r.__dict__.items() if not k.startswith("_")} for r in rows
+        ]
+    }
 
 
 @app.get("/api/marketplace/route", tags=["Marketplace"])
@@ -880,7 +1031,7 @@ def route(origin_lat: float, origin_lon: float, dest_lat: float, dest_lon: float
 
 
 # ─────────────────────────────────────────
-# SECTION 7 — PRICE ENDPOINTS
+# SECTION 11 — PRICE ENDPOINTS
 # ─────────────────────────────────────────
 
 @app.get("/api/prices/commodities", tags=["Prices"])
@@ -896,10 +1047,12 @@ def predict_price(commodity: str, days: int = 7):
     c = commodity.strip().lower()
     model = price_models.get(c)
     if model is None:
-        available = sorted(price_models.keys())
         raise HTTPException(
             status_code=404,
-            detail={"message": f"Commodity '{c}' not found", "available_commodities": available}
+            detail={
+                "message": f"Commodity '{c}' not found",
+                "available_commodities": sorted(price_models.keys()),
+            },
         )
     days = max(1, min(days, 365))
 
@@ -912,7 +1065,11 @@ def predict_price(commodity: str, days: int = 7):
         if len(today_rows) > 0:
             current_price = float(today_rows.iloc[-1]["yhat"])
         else:
-            current_price = float(forecast.iloc[-(days + 1)]["yhat"]) if len(forecast) > days else float(forecast.iloc[-1]["yhat"])
+            current_price = (
+                float(forecast.iloc[-(days + 1)]["yhat"])
+                if len(forecast) > days
+                else float(forecast.iloc[-1]["yhat"])
+            )
 
         future_rows = forecast.tail(int(days))
         predictions = [
@@ -928,7 +1085,11 @@ def predict_price(commodity: str, days: int = 7):
         max_row = future_rows.loc[future_rows["yhat"].idxmax()]
         max_price = float(max_row["yhat"])
         best_day = max_row["ds"].date().isoformat()
-        price_increase_pct = round(((max_price - current_price) / current_price) * 100, 1) if current_price > 0 else 0
+        price_increase_pct = (
+            round(((max_price - current_price) / current_price) * 100, 1)
+            if current_price > 0
+            else 0
+        )
 
         if max_price > current_price * 1.05:
             sell_recommendation = {
@@ -977,7 +1138,7 @@ def current_price(commodity: str):
 
 
 # ─────────────────────────────────────────
-# SECTION 8 — FINANCE ENDPOINTS
+# SECTION 12 — FINANCE ENDPOINTS
 # ─────────────────────────────────────────
 
 PER_ACRE_COSTS = {
@@ -987,7 +1148,12 @@ PER_ACRE_COSTS = {
 }
 
 
-def _scheme_matches(s: dict, state: Optional[str], crop_type: Optional[str], category: Optional[str]) -> bool:
+def _scheme_matches(
+    s: dict,
+    state: Optional[str],
+    crop_type: Optional[str],
+    category: Optional[str],
+) -> bool:
     try:
         st = (state or "").strip()
         ct = (crop_type or "").strip()
@@ -1003,12 +1169,11 @@ def _scheme_matches(s: dict, state: Optional[str], crop_type: Optional[str], cat
         return False
 
 
-# ── FIX: Use Pydantic model with proper validation for finance endpoint ──
 class FinanceCalculateRequest(BaseModel):
-    crop_type: str = Field(..., example="rice", description="Crop name e.g. rice, wheat, tomato, cotton")
-    land_acres: float = Field(..., gt=0, example=2.0, description="Total land area in acres (must be > 0)")
+    crop_type: str = Field(..., example="rice", description="Crop name e.g. rice, wheat, tomato")
+    land_acres: float = Field(..., gt=0, example=2.0, description="Total land area in acres (> 0)")
     state: str = Field(..., example="Karnataka", description="Indian state name")
-    category: str = Field("General", example="General", description="One of: SC, ST, OBC, General")
+    category: str = Field("General", example="General", description="SC, ST, OBC, or General")
 
 
 @app.post("/api/finance/calculate", tags=["Finance"])
@@ -1027,7 +1192,10 @@ def finance_calculate(payload: FinanceCalculateRequest):
     emi = kcc_loan * monthly_rate * pow(1 + monthly_rate, n) / (pow(1 + monthly_rate, n) - 1)
     annual_interest = kcc_loan * 0.04
 
-    matching = [s for s in schemes_data if _scheme_matches(s, state, payload.crop_type, category)]
+    matching = [
+        s for s in schemes_data
+        if _scheme_matches(s, state, payload.crop_type, category)
+    ]
 
     total_subsidy = 0.0
     for s in matching:
@@ -1066,7 +1234,10 @@ def finance_schemes(
 @app.get("/api/finance/emi", tags=["Finance"])
 def finance_emi(principal: float, annual_rate_percent: float, months: int):
     if principal <= 0 or annual_rate_percent < 0 or months <= 0:
-        raise HTTPException(status_code=400, detail="principal must be > 0, annual_rate_percent >= 0, months > 0")
+        raise HTTPException(
+            status_code=400,
+            detail="principal must be > 0, annual_rate_percent >= 0, months > 0",
+        )
     r = (annual_rate_percent / 100.0) / 12.0
     if r == 0:
         emi = principal / months
@@ -1084,7 +1255,7 @@ def finance_emi(principal: float, annual_rate_percent: float, months: int):
 
 
 # ─────────────────────────────────────────
-# SECTION 9 — MONITOR ENDPOINTS
+# SECTION 13 — MONITOR ENDPOINTS
 # ─────────────────────────────────────────
 
 @app.get("/api/monitor/overview", tags=["Monitor"], dependencies=[Depends(require_monitor)])
@@ -1107,7 +1278,10 @@ def monitor_overview(db: Session = Depends(get_db)):
 
 
 @app.get("/api/monitor/transactions", tags=["Monitor"], dependencies=[Depends(require_monitor)])
-def monitor_transactions(status_filter: Optional[str] = None, db: Session = Depends(get_db)):
+def monitor_transactions(
+    status_filter: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
     txs = db.query(Transaction).all()
     out = []
     for tx in txs:
@@ -1125,16 +1299,21 @@ def monitor_transactions(status_filter: Optional[str] = None, db: Session = Depe
             "amount": round(float(tx.agreed_price) * float(tx.quantity_kg), 2),
             "created_at": tx.created_at,
         })
-    out.sort(key=lambda x: x["created_at"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    out.sort(
+        key=lambda x: x["created_at"] or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
     return {"transactions": out, "count": len(out)}
 
 
 @app.get("/api/monitor/listings", tags=["Monitor"], dependencies=[Depends(require_monitor)])
 def monitor_listings(db: Session = Depends(get_db)):
-    rows = (db.query(Listing, User)
-            .join(User, Listing.farmer_id == User.id)
-            .order_by(Listing.created_at.desc())
-            .all())
+    rows = (
+        db.query(Listing, User)
+        .join(User, Listing.farmer_id == User.id)
+        .order_by(Listing.created_at.desc())
+        .all()
+    )
     out = []
     for listing, farmer in rows:
         d = {k: v for k, v in listing.__dict__.items() if not k.startswith("_")}
@@ -1153,5 +1332,5 @@ if __name__ == "__main__":
         "main:app",
         host=os.getenv("HOST", "0.0.0.0"),
         port=int(os.getenv("PORT", "8000")),
-        reload=True,
+        reload=False,
     )
