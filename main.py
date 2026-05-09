@@ -301,7 +301,7 @@ def load_ml_artifacts():
 def load_schemes():
     global schemes_data
     try:
-        schemes_path = os.path.join(BASE_DIR, "schemes.json")
+        schemes_path = os.path.join(BASE_DIR, "data", "government_schemes.json")
         with open(schemes_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         schemes_data = data if isinstance(data, list) else []
@@ -446,6 +446,8 @@ def on_startup():
     load_ml_artifacts()
     # Load government schemes
     load_schemes()
+    # Load lookup tables (groundwater + soil suitability)
+    load_lookup_data()
     print("\n[STARTUP] ✅ AgriChain backend ready. Visit /docs to explore all endpoints.\n")
 
 
@@ -1320,6 +1322,782 @@ def monitor_listings(db: Session = Depends(get_db)):
         d["farmer_name"] = farmer.name
         out.append(d)
     return {"listings": out, "count": len(out)}
+
+
+# ─────────────────────────────────────────
+
+# ─────────────────────────────────────────
+# SECTION 14 — LOOKUP DATA LOADING
+# ─────────────────────────────────────────
+
+groundwater_data: list = []
+soil_suitability_data: dict = {}
+
+DATA_DIR = os.path.join(BASE_DIR, "data")
+
+
+def load_lookup_data():
+    global groundwater_data, soil_suitability_data
+
+    # ── Groundwater ──
+    gw_path = os.path.join(DATA_DIR, "groundwater_india.json")
+    if os.path.exists(gw_path):
+        with open(gw_path, "r", encoding="utf-8") as f:
+            groundwater_data = json.load(f)
+        print(f"[STARTUP] Loaded {len(groundwater_data)} groundwater district records")
+    else:
+        print(f"[STARTUP WARN] groundwater_india.json not found at {gw_path}")
+
+    # ── Soil suitability ──
+    ss_path = os.path.join(DATA_DIR, "soil_crop_suitability.json")
+    if os.path.exists(ss_path):
+        with open(ss_path, "r", encoding="utf-8") as f:
+            soil_suitability_data = json.load(f)
+        print(f"[STARTUP] Loaded {len(soil_suitability_data)} soil type records")
+    else:
+        print(f"[STARTUP WARN] soil_crop_suitability.json not found at {ss_path}")
+
+
+# ─────────────────────────────────────────
+# SECTION 15 — ADDITIONAL DB MODELS
+# ─────────────────────────────────────────
+
+class DiseaseReport(Base):
+    __tablename__ = "disease_reports"
+    id           = Column(String(36), primary_key=True, default=_uuid_str)
+    farmer_id    = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    farm_id      = Column(String(36), ForeignKey("farms.id"), nullable=True)
+    image_url    = Column(String(500), nullable=True)
+    disease_detected = Column(String(200), nullable=True)
+    confidence   = Column(Float, nullable=True)
+    treatment_given  = Column(String(1000), nullable=True)
+    severity     = Column(String(20), nullable=True)
+    created_at   = Column(DateTime(timezone=True), nullable=False,
+                          default=lambda: datetime.now(timezone.utc))
+
+
+class WeatherAlert(Base):
+    __tablename__ = "weather_alerts"
+    id         = Column(String(36), primary_key=True, default=_uuid_str)
+    district   = Column(String(80), nullable=False, index=True)
+    state      = Column(String(80), nullable=True)
+    alert_type = Column(String(80), nullable=False)
+    severity   = Column(String(20), nullable=False)
+    message    = Column(String(1000), nullable=False)
+    sent_at    = Column(DateTime(timezone=True), nullable=False,
+                        default=lambda: datetime.now(timezone.utc))
+
+
+class CropCalendar(Base):
+    __tablename__ = "crop_calendar"
+    id               = Column(String(36), primary_key=True, default=_uuid_str)
+    crop_record_id   = Column(String(36), ForeignKey("crop_records.id"), nullable=False, index=True)
+    farmer_id        = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    task_date        = Column(DateTime(timezone=True), nullable=False)
+    task_type        = Column(String(80), nullable=False)
+    task_description = Column(String(500), nullable=False)
+    notified         = Column(Boolean, default=False)
+    completed        = Column(Boolean, default=False)
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_log"
+    id             = Column(String(36), primary_key=True, default=_uuid_str)
+    user_id        = Column(String(36), nullable=False, index=True)
+    action         = Column(String(200), nullable=False)
+    ip_address     = Column(String(50), nullable=True)
+    timestamp      = Column(DateTime(timezone=True), nullable=False,
+                            default=lambda: datetime.now(timezone.utc))
+    blockchain_tx  = Column(String(120), nullable=True)
+
+
+# ─────────────────────────────────────────
+# SECTION 16 — GROUNDWATER ENDPOINTS
+# ─────────────────────────────────────────
+
+GROUNDWATER_ADVICE = {
+    "Safe":          {"color": "green",  "icon": "✅", "message": "Groundwater level is safe. Standard irrigation practices recommended."},
+    "Semi-Critical": {"color": "yellow", "icon": "⚠️", "message": "Groundwater is semi-critical. Consider drip irrigation to reduce usage by 40%."},
+    "Critical":      {"color": "orange", "icon": "🔴", "message": "Groundwater is CRITICAL. Switch to drought-tolerant crops. Avoid paddy cultivation."},
+    "Over-Exploited":{"color": "red",    "icon": "🚨", "message": "Groundwater is OVER-EXPLOITED. Borewell drilling banned in this zone. Use only surface irrigation."},
+}
+
+
+@app.get("/api/groundwater/{district}", tags=["Groundwater"])
+def get_groundwater(district: str, state: Optional[str] = None):
+    """
+    Returns groundwater level category for a district.
+    Categories: Safe / Semi-Critical / Critical / Over-Exploited
+    """
+    district_clean = district.strip().title()
+    match = None
+
+    # Try exact match first
+    for row in groundwater_data:
+        if row["district"].lower() == district_clean.lower():
+            if state is None or row["state"].lower() == state.strip().lower():
+                match = row
+                break
+
+    # Fuzzy match if no exact
+    if not match:
+        for row in groundwater_data:
+            if district_clean.lower() in row["district"].lower():
+                match = row
+                break
+
+    if not match:
+        return {
+            "district": district_clean,
+            "category": "Unknown",
+            "level_mbgl": None,
+            "advice": "District not found in database. Contact local groundwater board.",
+            "color": "gray",
+            "subsidy_tip": "Check PMKSY drip irrigation subsidy at pmksy.gov.in",
+        }
+
+    cat = match.get("category", "Safe")
+    advice_info = GROUNDWATER_ADVICE.get(cat, GROUNDWATER_ADVICE["Safe"])
+
+    return {
+        "district": match["district"],
+        "state": match["state"],
+        "category": cat,
+        "level_mbgl": match.get("level_mbgl"),
+        "icon": advice_info["icon"],
+        "color": advice_info["color"],
+        "message": advice_info["message"],
+        "subsidy_tip": (
+            "You qualify for PMKSY drip irrigation subsidy (55% off). Apply at pmksy.gov.in"
+            if cat in ("Semi-Critical", "Critical", "Over-Exploited")
+            else "No immediate subsidy needed for irrigation."
+        ),
+        "recommended_crops": (
+            ["Millet", "Groundnut", "Sorghum", "Cowpea", "Chickpea"]
+            if cat in ("Critical", "Over-Exploited")
+            else None
+        ),
+    }
+
+
+@app.get("/api/groundwater", tags=["Groundwater"])
+def list_groundwater(state: Optional[str] = None, category: Optional[str] = None):
+    """List all groundwater districts, optionally filtered by state or category."""
+    result = groundwater_data
+    if state:
+        result = [r for r in result if r.get("state", "").lower() == state.strip().lower()]
+    if category:
+        result = [r for r in result if r.get("category", "").lower() == category.strip().lower()]
+    return {"districts": result, "count": len(result)}
+
+
+# ─────────────────────────────────────────
+# SECTION 17 — SOIL SUITABILITY ENDPOINTS
+# ─────────────────────────────────────────
+
+@app.get("/api/soil/suitability/{soil_type}", tags=["Soil"])
+def get_soil_suitability(soil_type: str):
+    """
+    Returns crop suitability for a given soil type.
+    Valid: Sandy, Clayey, Loamy, Black, Red
+    """
+    soil_clean = soil_type.strip().title()
+
+    # Map common aliases
+    aliases = {
+        "Black Cotton": "Black",
+        "Red Laterite": "Red",
+        "Clay": "Clayey",
+        "Sandy Loam": "Sandy",
+        "Loam": "Loamy",
+    }
+    soil_clean = aliases.get(soil_clean, soil_clean)
+
+    data = soil_suitability_data.get(soil_clean)
+    if not data:
+        return {
+            "soil_type": soil_clean,
+            "error": f"Soil type '{soil_clean}' not found",
+            "valid_types": list(soil_suitability_data.keys()),
+        }
+
+    return {
+        "soil_type": soil_clean,
+        "description": data.get("description"),
+        "suitable_crops": data.get("suitable_crops", []),
+        "unsuitable_crops": data.get("unsuitable_crops", []),
+        "ph_range": data.get("ph_range"),
+        "irrigation_need": data.get("irrigation_need"),
+        "tip": data.get("tip"),
+    }
+
+
+@app.get("/api/soil/all", tags=["Soil"])
+def get_all_soil_types():
+    """Returns all soil types with their crop suitability data."""
+    return {
+        "soil_types": [
+            {
+                "name": k,
+                "description": v.get("description"),
+                "suitable_crops": v.get("suitable_crops", []),
+                "ph_range": v.get("ph_range"),
+            }
+            for k, v in soil_suitability_data.items()
+        ],
+        "count": len(soil_suitability_data),
+    }
+
+
+# ─────────────────────────────────────────
+# SECTION 18 — WEATHER ENDPOINTS (ENHANCED)
+# ─────────────────────────────────────────
+
+FARMING_ALERT_RULES = [
+    {"condition": "humidity_high",  "threshold": 80,  "severity": "warning",  "message": "High humidity — elevated fungal disease risk. Consider preventive fungicide spray."},
+    {"condition": "humidity_vhigh", "threshold": 90,  "severity": "critical", "message": "Extreme humidity — do NOT spray pesticide. High chance of fungal disease outbreak."},
+    {"condition": "temp_high",      "threshold": 40,  "severity": "critical", "message": "Extreme heat — irrigate in early morning only. Risk of heat stress on crops."},
+    {"condition": "temp_low",       "threshold": 10,  "severity": "warning",  "message": "Low temperature — risk of frost. Cover young seedlings overnight."},
+    {"condition": "rain_heavy",     "threshold": 50,  "severity": "warning",  "message": "Heavy rain forecast — do not spray pesticide. Wait until 2 days after rain stops."},
+]
+
+
+@app.get("/api/weather/forecast", tags=["Weather"])
+def get_weather_forecast(lat: float, lon: float, district: Optional[str] = None):
+    """
+    Get 7-day weather forecast + groundwater status + farming alerts for a location.
+    Uses OpenWeatherMap API if key is available, otherwise returns structured demo data.
+    """
+    weather_result = {}
+    farming_alerts = []
+
+    # ── Live weather from OpenWeatherMap ──
+    if OPENWEATHER_API_KEY:
+        try:
+            url = (
+                f"https://api.openweathermap.org/data/2.5/forecast"
+                f"?lat={lat}&lon={lon}&appid={OPENWEATHER_API_KEY}&units=metric&cnt=56"
+            )
+            r = requests.get(url, timeout=8)
+            r.raise_for_status()
+            data = r.json()
+
+            # Parse forecast list
+            daily: dict = {}
+            for item in data.get("list", []):
+                date = item["dt_txt"].split(" ")[0]
+                if date not in daily:
+                    daily[date] = {
+                        "date": date,
+                        "temp_max": item["main"]["temp_max"],
+                        "temp_min": item["main"]["temp_min"],
+                        "humidity": item["main"]["humidity"],
+                        "description": item["weather"][0]["description"],
+                        "rain_mm": item.get("rain", {}).get("3h", 0),
+                        "wind_kmh": round(item["wind"]["speed"] * 3.6, 1),
+                    }
+                else:
+                    daily[date]["temp_max"] = max(daily[date]["temp_max"], item["main"]["temp_max"])
+                    daily[date]["rain_mm"] += item.get("rain", {}).get("3h", 0)
+
+            forecast_list = list(daily.values())[:7]
+
+            # ── Generate farming alerts from forecast ──
+            for day in forecast_list:
+                h = day.get("humidity", 0)
+                t = day.get("temp_max", 25)
+                r_mm = day.get("rain_mm", 0)
+                if h >= 90:
+                    farming_alerts.append({"date": day["date"], "severity": "critical",
+                        "message": f"Day {day['date']}: {FARMING_ALERT_RULES[1]['message']}"})
+                elif h >= 80:
+                    farming_alerts.append({"date": day["date"], "severity": "warning",
+                        "message": f"Day {day['date']}: {FARMING_ALERT_RULES[0]['message']}"})
+                if t >= 40:
+                    farming_alerts.append({"date": day["date"], "severity": "critical",
+                        "message": f"Day {day['date']}: {FARMING_ALERT_RULES[2]['message']}"})
+                if t <= 10:
+                    farming_alerts.append({"date": day["date"], "severity": "warning",
+                        "message": f"Day {day['date']}: {FARMING_ALERT_RULES[4]['message']}"})
+                if r_mm >= 50:
+                    farming_alerts.append({"date": day["date"], "severity": "warning",
+                        "message": f"Day {day['date']}: Heavy rain {round(r_mm,1)}mm — {FARMING_ALERT_RULES[3]['message']}"})
+
+            weather_result = {
+                "source": "OpenWeatherMap",
+                "location": {"lat": lat, "lon": lon},
+                "forecast": forecast_list,
+                "farming_alerts": farming_alerts,
+            }
+        except Exception as e:
+            weather_result = {"error": str(e), "source": "demo"}
+    else:
+        # Demo mode
+        forecast_list = [
+            {"date": f"Day {i+1}", "temp_max": 30 + i, "temp_min": 22,
+             "humidity": 65 + i*2, "description": "partly cloudy", "rain_mm": 0, "wind_kmh": 12}
+            for i in range(7)
+        ]
+        farming_alerts = [
+            {"severity": "warning", "message": "Demo mode — add OPENWEATHER_API_KEY to Render env for live data"},
+        ]
+        weather_result = {"source": "demo", "forecast": forecast_list, "farming_alerts": farming_alerts}
+
+    # ── Add groundwater info if district provided ──
+    gw_info = None
+    if district:
+        gw_match = next(
+            (r for r in groundwater_data if r["district"].lower() == district.strip().lower()), None
+        )
+        if gw_match:
+            cat = gw_match.get("category", "Safe")
+            gw_info = {
+                "district": gw_match["district"],
+                "category": cat,
+                "level_mbgl": gw_match.get("level_mbgl"),
+                "warning": GROUNDWATER_ADVICE.get(cat, {}).get("message"),
+            }
+
+    weather_result["groundwater"] = gw_info
+    return weather_result
+
+
+@app.get("/api/weather/current", tags=["Weather"])
+def get_current_weather(lat: float, lon: float):
+    """Get current weather conditions for a GPS location."""
+    if not OPENWEATHER_API_KEY:
+        return {
+            "temp": 29.5, "humidity": 68, "description": "partly cloudy",
+            "wind_kmh": 12, "pressure": 1012,
+            "note": "Demo data — add OPENWEATHER_API_KEY env var for live data"
+        }
+    try:
+        url = (
+            f"https://api.openweathermap.org/data/2.5/weather"
+            f"?lat={lat}&lon={lon}&appid={OPENWEATHER_API_KEY}&units=metric"
+        )
+        r = requests.get(url, timeout=8)
+        r.raise_for_status()
+        w = r.json()
+        return {
+            "temp": round(w["main"]["temp"], 1),
+            "feels_like": round(w["main"]["feels_like"], 1),
+            "humidity": w["main"]["humidity"],
+            "pressure": w["main"]["pressure"],
+            "description": w["weather"][0]["description"],
+            "wind_kmh": round(w["wind"]["speed"] * 3.6, 1),
+            "visibility_km": round(w.get("visibility", 10000) / 1000, 1),
+            "city": w.get("name", ""),
+            "country": w.get("sys", {}).get("country", ""),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Weather fetch failed: {e}")
+
+
+# ─────────────────────────────────────────
+# SECTION 19 — CROP CALENDAR ENDPOINTS
+# ─────────────────────────────────────────
+
+# Task templates per crop type (days from planting)
+CROP_CALENDAR_TEMPLATES: dict = {
+    "rice":      [
+        (1,  "Soil Preparation", "Plough field to 15cm depth. Apply basal dose of NPK 120:60:60 kg/ha."),
+        (3,  "Transplanting",    "Transplant 21-day-old seedlings at 20x15cm spacing."),
+        (10, "Weed Control",     "Apply pre-emergence herbicide. Hand weed if needed."),
+        (21, "Fertilizer",       "Apply top dressing — urea 60 kg/ha."),
+        (35, "Pest Check",       "Check for stem borer and leaf folder. Apply chlorpyrifos if >10% infestation."),
+        (50, "Water Management", "Maintain 5cm standing water. Drain 10 days before harvest."),
+        (75, "Harvest Signal",   "Grain moisture at 20-25%. Golden colour indicates readiness."),
+        (85, "Harvest",          "Harvest and thresh. Dry to 14% moisture before storage."),
+    ],
+    "wheat":     [
+        (1,  "Soil Preparation", "Deep plough, apply FYM 10 tonnes/ha. Basal fertilizer NPK 120:60:40."),
+        (7,  "Sowing",           "Sow at 100kg/ha seed rate. Depth: 5cm. Row spacing: 22cm."),
+        (21, "First Irrigation", "Critical first irrigation (Crown Root Initiation stage)."),
+        (35, "Fertilizer",       "Apply top dressing — split urea application 60 kg/ha."),
+        (45, "Pest Monitoring",  "Watch for aphids and yellow rust. Spray propiconazole if rust appears."),
+        (60, "Second Irrigation","Irrigation at heading stage is critical for grain filling."),
+        (100,"Harvest",          "Harvest when grain moisture drops to 12-14%. Use combine if available."),
+    ],
+    "tomato":    [
+        (1,  "Nursery",         "Prepare nursery bed. Sow seeds. Cover with fine soil + FYM."),
+        (25, "Transplanting",   "Transplant 25-day seedlings at 60x45cm spacing. Water immediately."),
+        (35, "Staking",         "Provide bamboo stakes. Tie plants. Encourage upward growth."),
+        (42, "Fertilizer",      "Apply NPK 19:19:19 via drip or foliar spray."),
+        (50, "Flower Check",    "Ensure pollination. Spray boron 0.3% for fruit set improvement."),
+        (60, "Pest Control",    "Watch for leaf curl virus (whitefly vector). Apply imidacloprid."),
+        (70, "First Harvest",   "Pick firm, pink-red fruits. Harvest every 4-5 days."),
+        (90, "Final Harvest",   "Complete harvest. Remove crop residue to prevent disease carryover."),
+    ],
+    "cotton":    [
+        (1,  "Soil Prep",       "Deep plough. Ridges at 90cm. Apply FYM + basal NPK 60:30:30 kg/ha."),
+        (7,  "Sowing",          "Sow 2 seeds/hill at 90x60cm. Thin to 1 plant after germination."),
+        (25, "Thinning",        "Remove weak plants. Apply 2% urea spray for early growth boost."),
+        (40, "Fertilizer",      "Apply top dressing urea 30 kg/ha. Side-dress with K if deficient."),
+        (55, "Pest Scout",      "Bollworm critical stage. Check 20 plants/acre. Spray if >5 eggs/plant."),
+        (70, "Irrigation",      "Boll development stage — most critical. Maintain moisture."),
+        (120,"Boll Opening",    "80% boll opening = harvest signal. Pick every 8-10 days."),
+        (150,"Final Harvest",   "Complete picking. Separate grades A/B. Clean seeds for next season."),
+    ],
+    "groundnut": [
+        (1,  "Soil Prep",       "Sandy loam preferred. Apply gypsum 400 kg/ha for calcium supplement."),
+        (7,  "Sowing",          "Sow shelled seeds 5cm deep. 30x10cm spacing. Apply Rhizobium culture."),
+        (20, "Earthing Up",     "Earth up soil around base. Supports pegging and pod formation."),
+        (35, "Pest Check",      "Watch for leaf miner and thrips. Spray dimethoate 1ml/litre."),
+        (50, "Peg Formation",   "Critical stage — no water stress. Irrigate if dry. Avoid waterlogging."),
+        (80, "Maturity Check",  "Pull 3-4 plants. Inner pod surface should be dark. Shake — seeds rattle."),
+        (100,"Harvest",         "Dig, shake off soil, dry in windrows 3-4 days before threshing."),
+    ],
+    "maize":     [
+        (1,  "Soil Prep",       "Fine tilth. Apply FYM. Basal dose NPK 150:75:37.5 kg/ha."),
+        (5,  "Sowing",          "Sow at 5cm depth. 60x20cm spacing. Two seeds/hill, thin later."),
+        (15, "Gap Filling",     "Fill missing hills within 7 days of germination."),
+        (30, "Top Dressing",    "Apply split urea — 75 kg/ha at knee-high stage."),
+        (45, "Tasseling",       "Critical pollination stage — ensure adequate moisture."),
+        (60, "Silking",         "Silk emerges — water stress at this stage cuts yield by 30%. Irrigate."),
+        (80, "Maturity",        "Black layer formation on kernel base = physiological maturity."),
+        (90, "Harvest",         "Dry to 15% moisture. Dehusk immediately after harvest."),
+    ],
+    "default":   [
+        (1,  "Soil Preparation","Prepare field — plough, level, and apply organic matter."),
+        (7,  "Planting",        "Plant seeds or seedlings at recommended spacing."),
+        (21, "Fertilizer",      "Apply first dose of recommended fertilizer."),
+        (35, "Weeding",         "Remove weeds. Conserve soil moisture with mulching."),
+        (50, "Pest Check",      "Scout for pests and diseases. Apply control measures if needed."),
+        (70, "Irrigation",      "Ensure adequate moisture during critical growth stages."),
+        (90, "Harvest",         "Harvest at correct maturity. Follow post-harvest handling guidelines."),
+    ],
+}
+
+
+class CreateCropRecordRequest(BaseModel):
+    farm_id: str = Field(..., example="farm-uuid-here")
+    crop_type: str = Field(..., example="tomato")
+    planting_date: str = Field(..., example="2026-06-01", description="ISO date YYYY-MM-DD")
+    notes: Optional[str] = Field(None, example="Planted in field A")
+
+
+@app.post("/api/calendar/register-crop", tags=["Crop Calendar"],
+          dependencies=[Depends(require_farmer)])
+def register_crop_and_generate_calendar(
+    payload: CreateCropRecordRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Register a new crop and auto-generate a day-by-day task calendar from planting to harvest.
+    """
+    try:
+        planting_dt = datetime.strptime(payload.planting_date, "%Y-%m-%d").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        raise HTTPException(status_code=400, detail="planting_date must be YYYY-MM-DD")
+
+    # Create CropRecord
+    record = CropRecord(
+        farm_id=payload.farm_id,
+        crop_type=payload.crop_type.strip().lower(),
+        planting_date=planting_dt,
+        notes=payload.notes,
+    )
+    db.add(record)
+    db.flush()  # get record.id
+
+    # Generate calendar tasks
+    template = CROP_CALENDAR_TEMPLATES.get(
+        payload.crop_type.strip().lower(),
+        CROP_CALENDAR_TEMPLATES["default"],
+    )
+
+    tasks_created = []
+    for day_offset, task_type, task_desc in template:
+        task_date = planting_dt + timedelta(days=day_offset)
+        task = CropCalendar(
+            crop_record_id=record.id,
+            farmer_id=user.id,
+            task_date=task_date,
+            task_type=task_type,
+            task_description=task_desc,
+            notified=False,
+            completed=False,
+        )
+        db.add(task)
+        tasks_created.append({
+            "task_date": task_date.date().isoformat(),
+            "task_type": task_type,
+            "task_description": task_desc,
+            "days_from_planting": day_offset,
+        })
+
+    db.commit()
+    db.refresh(record)
+
+    return {
+        "crop_record_id": record.id,
+        "crop_type": record.crop_type,
+        "planting_date": payload.planting_date,
+        "expected_harvest": tasks_created[-1]["task_date"] if tasks_created else None,
+        "total_tasks": len(tasks_created),
+        "calendar": tasks_created,
+        "message": f"✅ Calendar generated with {len(tasks_created)} tasks for {payload.crop_type}",
+    }
+
+
+@app.get("/api/calendar/my-tasks", tags=["Crop Calendar"],
+         dependencies=[Depends(require_farmer)])
+def get_my_tasks(
+    upcoming_days: int = 7,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Returns upcoming tasks for the farmer in the next N days."""
+    now = datetime.now(timezone.utc)
+    cutoff = now + timedelta(days=upcoming_days)
+
+    tasks = (
+        db.query(CropCalendar)
+        .filter(
+            CropCalendar.farmer_id == user.id,
+            CropCalendar.task_date >= now,
+            CropCalendar.task_date <= cutoff,
+            CropCalendar.completed == False,
+        )
+        .order_by(CropCalendar.task_date)
+        .all()
+    )
+
+    return {
+        "upcoming_tasks": [
+            {
+                "id": t.id,
+                "task_date": t.task_date.date().isoformat(),
+                "task_type": t.task_type,
+                "task_description": t.task_description,
+                "days_away": (t.task_date.date() - now.date()).days,
+                "completed": t.completed,
+            }
+            for t in tasks
+        ],
+        "count": len(tasks),
+        "period_days": upcoming_days,
+    }
+
+
+@app.post("/api/calendar/complete-task/{task_id}", tags=["Crop Calendar"],
+          dependencies=[Depends(require_farmer)])
+def complete_task(
+    task_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Mark a crop calendar task as completed."""
+    task = db.query(CropCalendar).filter(
+        CropCalendar.id == task_id,
+        CropCalendar.farmer_id == user.id,
+    ).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    task.completed = True
+    db.commit()
+    return {"message": "Task marked as completed", "task_id": task_id}
+
+
+@app.get("/api/calendar/full-calendar/{crop_record_id}", tags=["Crop Calendar"],
+         dependencies=[Depends(require_farmer)])
+def get_full_calendar(
+    crop_record_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Returns the full calendar for a specific crop registration."""
+    tasks = (
+        db.query(CropCalendar)
+        .filter(
+            CropCalendar.crop_record_id == crop_record_id,
+            CropCalendar.farmer_id == user.id,
+        )
+        .order_by(CropCalendar.task_date)
+        .all()
+    )
+    if not tasks:
+        raise HTTPException(status_code=404, detail="No calendar found for this crop record")
+
+    now = datetime.now(timezone.utc).date()
+    return {
+        "crop_record_id": crop_record_id,
+        "tasks": [
+            {
+                "id": t.id,
+                "task_date": t.task_date.date().isoformat(),
+                "task_type": t.task_type,
+                "task_description": t.task_description,
+                "completed": t.completed,
+                "status": (
+                    "completed" if t.completed
+                    else "overdue" if t.task_date.date() < now
+                    else "today" if t.task_date.date() == now
+                    else "upcoming"
+                ),
+            }
+            for t in tasks
+        ],
+        "total": len(tasks),
+        "completed": sum(1 for t in tasks if t.completed),
+        "overdue": sum(1 for t in tasks if not t.completed and t.task_date.date() < now),
+    }
+
+
+# ─────────────────────────────────────────
+# SECTION 20 — DISEASE DETECTION ENDPOINT
+# ─────────────────────────────────────────
+
+# Disease treatment database
+DISEASE_TREATMENTS: dict = {
+    "Early Blight":        {"treatment": "Apply Mancozeb 75% WP at 2g/litre. Spray every 7 days. Remove infected leaves.", "severity": "moderate"},
+    "Late Blight":         {"treatment": "Apply Metalaxyl + Mancozeb at 2.5g/litre. Critical — act within 24 hours.", "severity": "critical"},
+    "Bacterial Spot":      {"treatment": "Spray copper oxychloride 3g/litre. Avoid overhead irrigation.", "severity": "moderate"},
+    "Leaf Mold":           {"treatment": "Improve ventilation. Apply chlorothalonil 2g/litre in evening.", "severity": "low"},
+    "Septoria Leaf Spot":  {"treatment": "Remove lower infected leaves. Apply difenoconazole 1ml/litre.", "severity": "moderate"},
+    "Spider Mites":        {"treatment": "Apply abamectin 0.5ml/litre. Spray leaf undersides. Repeat after 5 days.", "severity": "moderate"},
+    "Target Spot":         {"treatment": "Apply azoxystrobin 1ml/litre. Ensure good air circulation.", "severity": "low"},
+    "Mosaic Virus":        {"treatment": "No cure — remove infected plants. Control aphid/whitefly vectors with imidacloprid.", "severity": "critical"},
+    "Yellow Curl Virus":   {"treatment": "Remove infected plants. Spray imidacloprid 0.5ml/litre for whitefly control.", "severity": "critical"},
+    "Healthy":             {"treatment": "No disease detected. Continue regular monitoring every 7 days.", "severity": "none"},
+    "Powdery Mildew":      {"treatment": "Apply sulphur dust 25 kg/ha or wettable sulphur 3g/litre. Spray in cool evening.", "severity": "moderate"},
+    "Downy Mildew":        {"treatment": "Apply metalaxyl 1g + mancozeb 2g per litre. Avoid leaf wetting.", "severity": "high"},
+    "Rust":                {"treatment": "Apply propiconazole 1ml/litre or tebuconazole 1ml/litre. Act at first sign.", "severity": "high"},
+    "Leaf Blight":         {"treatment": "Apply carbendazim 1g/litre. Remove crop debris. Improve drainage.", "severity": "moderate"},
+    "Black Rot":           {"treatment": "Remove infected plant parts. Apply copper-based fungicide. Avoid wounding plants.", "severity": "high"},
+}
+
+
+@app.post("/api/advisory/disease-detect", tags=["Advisory"])
+async def detect_disease(request: Request):
+    """
+    AI crop disease detection endpoint.
+    If ONNX model is loaded — runs real inference.
+    Otherwise — returns intelligent demo response based on filename/metadata.
+    """
+    from fastapi import UploadFile, File
+    import io
+
+    try:
+        form = await request.form()
+        file = form.get("file")
+
+        if file is None:
+            raise HTTPException(status_code=400, detail="No file uploaded. Send image as 'file' field.")
+
+        img_bytes = await file.read()
+        filename = getattr(file, "filename", "crop.jpg").lower()
+
+        # Try ONNX inference if model available
+        onnx_path = os.path.join(ML_DIR, "disease_model.onnx")
+        if os.path.exists(onnx_path):
+            try:
+                import onnxruntime as ort
+                from PIL import Image as PILImage
+
+                session = ort.InferenceSession(onnx_path)
+                img = PILImage.open(io.BytesIO(img_bytes)).convert("RGB").resize((224, 224))
+                arr = np.array(img).astype(np.float32) / 255.0
+                arr = np.transpose(arr, (2, 0, 1))[np.newaxis, :]
+
+                input_name = session.get_inputs()[0].name
+                outputs = session.run(None, {input_name: arr})
+                probs = outputs[0][0]
+                top_idx = int(np.argmax(probs))
+                confidence = float(probs[top_idx])
+
+                # Load class names
+                classes_path = os.path.join(ML_DIR, "disease_classes.json")
+                if os.path.exists(classes_path):
+                    with open(classes_path) as cf:
+                        classes = json.load(cf)
+                    disease_name = classes[top_idx] if top_idx < len(classes) else f"Class_{top_idx}"
+                else:
+                    disease_name = f"Disease_Class_{top_idx}"
+
+                disease_clean = disease_name.replace("_", " ").replace("  ", " ").strip().title()
+                treatment_info = DISEASE_TREATMENTS.get(disease_clean, {
+                    "treatment": "Consult your local KVK (Krishi Vigyan Kendra) for treatment advice.",
+                    "severity": "unknown"
+                })
+
+                return {
+                    "disease": disease_clean,
+                    "confidence": round(confidence, 4),
+                    "confidence_percent": round(confidence * 100, 1),
+                    "treatment": treatment_info["treatment"],
+                    "severity": treatment_info["severity"],
+                    "model": "YOLOv8-ONNX",
+                    "mode": "live_inference",
+                }
+            except Exception as onnx_err:
+                print(f"[WARN] ONNX inference failed: {onnx_err}")
+
+        # ── Demo mode — smart response based on image size ──
+        img_size_kb = len(img_bytes) / 1024
+        # Rotate through demo diseases for variety
+        demo_diseases = [
+            ("Early Blight", 0.94),
+            ("Powdery Mildew", 0.87),
+            ("Late Blight", 0.91),
+            ("Healthy", 0.97),
+            ("Rust", 0.83),
+        ]
+        # Pick based on file size modulo for deterministic demo
+        idx = int(img_size_kb) % len(demo_diseases)
+        demo_disease, demo_conf = demo_diseases[idx]
+        treatment_info = DISEASE_TREATMENTS.get(demo_disease, {
+            "treatment": "Consult local KVK for advice.", "severity": "moderate"
+        })
+
+        return {
+            "disease": demo_disease,
+            "confidence": demo_conf,
+            "confidence_percent": round(demo_conf * 100, 1),
+            "treatment": treatment_info["treatment"],
+            "severity": treatment_info["severity"],
+            "model": "Demo",
+            "mode": "demo — train YOLOv8 in Colab and save disease_model.onnx to ml_models/ for live inference",
+            "image_size_kb": round(img_size_kb, 1),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Disease detection failed: {str(e)}")
+
+
+# ─────────────────────────────────────────
+# SECTION 21 — AUDIT LOG ENDPOINT
+# ─────────────────────────────────────────
+
+@app.get("/api/monitor/audit-log", tags=["Monitor"],
+         dependencies=[Depends(require_monitor)])
+def get_audit_log(limit: int = 100, db: Session = Depends(get_db)):
+    logs = (
+        db.query(AuditLog)
+        .order_by(AuditLog.timestamp.desc())
+        .limit(limit)
+        .all()
+    )
+    return {
+        "logs": [
+            {
+                "id": l.id,
+                "user_id": l.user_id,
+                "action": l.action,
+                "ip_address": l.ip_address,
+                "timestamp": l.timestamp,
+                "blockchain_tx": l.blockchain_tx,
+            }
+            for l in logs
+        ],
+        "count": len(logs),
+    }
 
 
 # ─────────────────────────────────────────

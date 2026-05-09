@@ -1,0 +1,42 @@
+{
+  "Sandy": {
+    "description": "Light, fast-draining soil. Low water retention. Warms up quickly.",
+    "suitable_crops": ["groundnut", "sweet potato", "carrot", "watermelon", "muskmelon", "millet", "cowpea", "castor", "tapioca"],
+    "unsuitable_crops": ["rice", "wheat", "sugarcane"],
+    "ph_range": "5.5-7.0",
+    "irrigation_need": "High — water drains fast, irrigate more frequently",
+    "tip": "Add organic manure to improve water retention"
+  },
+  "Clayey": {
+    "description": "Heavy soil, high water retention, poor drainage, prone to waterlogging.",
+    "suitable_crops": ["rice", "wheat", "cotton", "pulses", "jute", "paddy"],
+    "unsuitable_crops": ["groundnut", "carrot", "sweet potato"],
+    "ph_range": "6.0-7.5",
+    "irrigation_need": "Low — retains water well",
+    "tip": "Needs deep ploughing; avoid over-irrigation"
+  },
+  "Loamy": {
+    "description": "Best all-purpose soil. Balanced sand, silt, clay. Excellent for most crops.",
+    "suitable_crops": ["wheat", "rice", "sugarcane", "cotton", "maize", "vegetables", "pulses", "oilseeds", "fruits", "groundnut"],
+    "unsuitable_crops": [],
+    "ph_range": "6.0-7.5",
+    "irrigation_need": "Moderate",
+    "tip": "Most productive soil type — maintain with organic matter"
+  },
+  "Black": {
+    "description": "Black cotton soil (Regur). High clay content, moisture retention, fertile.",
+    "suitable_crops": ["cotton", "jowar", "sunflower", "soybean", "wheat", "onion", "citrus", "tobacco"],
+    "unsuitable_crops": ["rice", "coconut"],
+    "ph_range": "7.5-8.5",
+    "irrigation_need": "Low to moderate — retains moisture long after rain",
+    "tip": "Cracks when dry — mulching helps retain moisture"
+  },
+  "Red": {
+    "description": "Iron-rich red/laterite soil. Well-drained, slightly acidic. Lower fertility.",
+    "suitable_crops": ["groundnut", "ragi", "cashew", "tapioca", "millet", "tobacco", "oilseeds"],
+    "unsuitable_crops": ["wheat", "rice"],
+    "ph_range": "5.5-7.0",
+    "irrigation_need": "High — drains quickly",
+    "tip": "Add lime to correct acidity; supplement with NPK fertilizer"
+  }
+}
