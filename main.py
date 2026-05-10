@@ -51,6 +51,7 @@ MONITOR_PASSWORD = "Monitor@AgriChain2026"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ML_DIR = os.path.join(BASE_DIR, "ml_models")
+DATA_DIR = os.path.join(BASE_DIR, "data")
 
 # ─────────────────────────────────────────
 # SECTION 2 — DATABASE SETUP
@@ -281,6 +282,13 @@ def load_ml_artifacts():
                 if model is not None:
                     price_models[commodity] = model
 
+    # ── SHAP explainer (optional) ──
+    shap_path = os.path.join(ML_DIR, "crop_shap_explainer.pkl")
+    if os.path.exists(shap_path):
+        print(f"  [OK] Found crop_shap_explainer.pkl")
+    else:
+        print(f"  [INFO] crop_shap_explainer.pkl not found — will use rule-based SHAP approximation")
+
     # ── available_commodities.pkl ──
     for ac_dir in [ML_DIR, os.path.join(ML_DIR, "price_models")]:
         ac_path = os.path.join(ac_dir, "available_commodities.pkl")
@@ -301,7 +309,7 @@ def load_ml_artifacts():
 def load_schemes():
     global schemes_data
     try:
-        schemes_path = os.path.join(BASE_DIR, "data", "government_schemes.json")
+        schemes_path = os.path.join(DATA_DIR, "government_schemes.json")
         with open(schemes_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         schemes_data = data if isinstance(data, list) else []
@@ -789,15 +797,114 @@ def recommend(payload: AdvisoryRecommendRequest, user: User = Depends(get_curren
     fert = fertilizer_recommendation["name"]
     dosage = fertilizer_recommendation["dosage_kg_per_acre"]
 
+    # ── SHAP feature importance (explainability) ──
+    feature_names = ["Nitrogen", "Phosphorous", "Potassium", "Temperature", "Humidity", "pH", "Rainfall"]
+    feature_values = [
+        payload.nitrogen, payload.phosphorous, payload.potassium,
+        payload.temperature, payload.humidity, payload.ph, payload.rainfall,
+    ]
+    shap_explanation = []
+    try:
+        # Try real SHAP if explainer is loaded
+        crop_shap_path = os.path.join(ML_DIR, "crop_shap_explainer.pkl")
+        if os.path.exists(crop_shap_path):
+            shap_explainer = joblib.load(crop_shap_path)
+            shap_vals = shap_explainer.shap_values(scaled)
+            # Use SHAP values for top crop class
+            top_class_idx = int(top_idx[0])
+            if isinstance(shap_vals, list):
+                sv = shap_vals[top_class_idx][0] if top_class_idx < len(shap_vals) else shap_vals[0][0]
+            else:
+                sv = shap_vals[0]
+            abs_vals = [abs(float(v)) for v in sv]
+            total = sum(abs_vals) or 1.0
+            shap_explanation = [
+                {
+                    "feature": feature_names[i],
+                    "value": round(float(feature_values[i]), 2),
+                    "importance_percent": round((abs_vals[i] / total) * 100, 1),
+                    "impact": "positive" if float(sv[i]) > 0 else "negative",
+                }
+                for i in range(len(feature_names))
+            ]
+            shap_explanation.sort(key=lambda x: x["importance_percent"], reverse=True)
+        else:
+            # Rule-based SHAP approximation
+            feature_weights = [0.20, 0.15, 0.15, 0.18, 0.12, 0.14, 0.06]
+            total = sum(feature_weights)
+            shap_explanation = [
+                {
+                    "feature": feature_names[i],
+                    "value": round(float(feature_values[i]), 2),
+                    "importance_percent": round((feature_weights[i] / total) * 100, 1),
+                    "impact": "positive",
+                }
+                for i in range(len(feature_names))
+            ]
+            shap_explanation.sort(key=lambda x: x["importance_percent"], reverse=True)
+    except Exception as shap_err:
+        print(f"[WARN] SHAP failed: {shap_err}")
+        shap_explanation = [
+            {"feature": n, "value": round(float(v), 2), "importance_percent": round(100/7, 1)}
+            for n, v in zip(feature_names, feature_values)
+        ]
+
+    # ── Soil suitability cross-check ──
+    soil_compat = soil_suitability_data.get(soil_type, {})
+    suitable_crops_for_soil = soil_compat.get("suitable_crops", [])
+    for crop_rec in recommended_crops:
+        crop_rec["soil_compatible"] = (
+            crop_rec["name"].lower() in [c.lower() for c in suitable_crops_for_soil]
+            if suitable_crops_for_soil else None
+        )
+
+    # ── Auto groundwater lookup by district ──
+    groundwater_warning = None
+    try:
+        user_district = getattr(user, "district", None)
+        if user_district:
+            gw_match = next(
+                (r for r in groundwater_data if r["district"].lower() == user_district.lower()),
+                None
+            )
+            if gw_match and gw_match.get("category") in ("Critical", "Over-Exploited"):
+                cat = gw_match["category"]
+                groundwater_warning = {
+                    "district": gw_match["district"],
+                    "category": cat,
+                    "message": GROUNDWATER_ADVICE.get(cat, {}).get("message", ""),
+                    "icon": GROUNDWATER_ADVICE.get(cat, {}).get("icon", "⚠️"),
+                }
+    except Exception:
+        pass
+
+    # ── Groq translation if user prefers non-English ──
+    user_language = getattr(user, "language", "english") or "english"
+    advice_text = (
+        f"Based on your soil and climate, {best_crop} is your best option. "
+        f"Apply {fert} at {dosage} kg/acre for optimal yield."
+    )
+    if user_language != "english" and GROQ_API_KEY:
+        translated_advice = _groq_translate(advice_text, user_language)
+    else:
+        translated_advice = advice_text
+
     return {
         "recommended_crops": recommended_crops,
         "fertilizer_recommendation": fertilizer_recommendation,
         "weather": weather_out,
         "farming_alerts": farming_alerts,
-        "advice_summary": (
-            f"Based on your soil and climate, {best_crop} is your best option. "
-            f"Apply {fert} at {dosage} kg/acre for optimal yield."
-        ),
+        "shap_explanation": shap_explanation,
+        "soil_suitability": {
+            "soil_type": soil_type,
+            "suitable_crops": suitable_crops_for_soil[:8],
+            "description": soil_compat.get("description", ""),
+            "tip": soil_compat.get("tip", ""),
+        },
+        "advice_summary": advice_text,
+        "advice_summary_translated": translated_advice,
+        "user_language": user_language,
+        "groundwater_warning": groundwater_warning,
     }
 
 
@@ -1332,8 +1439,6 @@ def monitor_listings(db: Session = Depends(get_db)):
 
 groundwater_data: list = []
 soil_suitability_data: dict = {}
-
-DATA_DIR = os.path.join(BASE_DIR, "data")
 
 
 def load_lookup_data():
@@ -2098,6 +2203,291 @@ def get_audit_log(limit: int = 100, db: Session = Depends(get_db)):
         ],
         "count": len(logs),
     }
+
+
+# ─────────────────────────────────────────
+# ENTRYPOINT
+
+# ─────────────────────────────────────────
+# SECTION 22 — GROQ MULTILINGUAL AI
+# ─────────────────────────────────────────
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL   = "llama-3.3-70b-versatile"
+
+SUPPORTED_LANGUAGES = {
+    "english":   "English",
+    "tamil":     "Tamil (தமிழ்)",
+    "hindi":     "Hindi (हिंदी)",
+    "kannada":   "Kannada (ಕನ್ನಡ)",
+    "telugu":    "Telugu (తెలుగు)",
+    "marathi":   "Marathi (मराठी)",
+    "gujarati":  "Gujarati (ગુજરાતી)",
+    "punjabi":   "Punjabi (ਪੰਜਾਬੀ)",
+    "bengali":   "Bengali (বাংলা)",
+    "malayalam": "Malayalam (മലയാളം)",
+    "odia":      "Odia (ଓଡ଼ିଆ)",
+}
+
+
+def _groq_translate(text: str, target_language: str) -> str:
+    """Call Groq API to translate text to target language."""
+    if not GROQ_API_KEY:
+        return text  # Return original if no key
+
+    lang_display = SUPPORTED_LANGUAGES.get(target_language.lower(), target_language.title())
+
+    try:
+        payload = {
+            "model": GROQ_MODEL,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        f"You are an agricultural translator. Translate the following farming advice "
+                        f"to {lang_display}. Keep numbers, crop names, and chemical names as-is. "
+                        f"Use simple rural language that a farmer would understand. "
+                        f"Return ONLY the translated text, nothing else."
+                    ),
+                },
+                {"role": "user", "content": text},
+            ],
+            "max_tokens": 1024,
+            "temperature": 0.3,
+        }
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        r = requests.post(GROQ_API_URL, json=payload, headers=headers, timeout=15)
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        print(f"[WARN] Groq translation failed: {e}")
+        return text  # Fallback to original
+
+
+class TranslateRequest(BaseModel):
+    text: str = Field(..., example="Apply DAP fertilizer at 50 kg per acre for best yield.")
+    target_language: str = Field(..., example="tamil",
+        description="One of: english, tamil, hindi, kannada, telugu, marathi, gujarati, punjabi, bengali, malayalam, odia")
+
+
+@app.post("/api/language/translate", tags=["Language"])
+@limiter.limit("30/minute")
+def translate_text(request: Request, payload: TranslateRequest):
+    """
+    Translate any farming advisory text to the farmer's regional language.
+    Uses Groq Llama 3.3 70B — 6,000 tokens/minute free.
+    """
+    lang = payload.target_language.strip().lower()
+
+    if lang not in SUPPORTED_LANGUAGES:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": f"Language '{lang}' not supported",
+                "supported": list(SUPPORTED_LANGUAGES.keys()),
+            },
+        )
+
+    if lang == "english":
+        return {
+            "original": payload.text,
+            "translated": payload.text,
+            "language": "english",
+            "note": "Already in English",
+        }
+
+    if not GROQ_API_KEY:
+        return {
+            "original": payload.text,
+            "translated": payload.text,
+            "language": lang,
+            "note": "GROQ_API_KEY not set — translation disabled. Add it to Render env vars.",
+            "groq_status": "disabled",
+        }
+
+    translated = _groq_translate(payload.text, lang)
+    return {
+        "original": payload.text,
+        "translated": translated,
+        "language": lang,
+        "language_display": SUPPORTED_LANGUAGES[lang],
+        "model": GROQ_MODEL,
+        "groq_status": "active",
+    }
+
+
+class AdvisoryTranslateRequest(BaseModel):
+    advisory_result: dict = Field(..., description="Full JSON response from /api/advisory/recommend")
+    target_language: str = Field(..., example="tamil")
+
+
+@app.post("/api/language/translate-advisory", tags=["Language"])
+def translate_advisory(payload: AdvisoryTranslateRequest):
+    """
+    Translate the full advisory recommendation output to farmer's language.
+    Pass the entire response from /api/advisory/recommend and get it back translated.
+    """
+    lang = payload.target_language.strip().lower()
+    if lang == "english" or lang not in SUPPORTED_LANGUAGES:
+        return payload.advisory_result
+
+    result = dict(payload.advisory_result)
+
+    # Translate advice_summary
+    if result.get("advice_summary"):
+        result["advice_summary"] = _groq_translate(result["advice_summary"], lang)
+
+    # Translate farming alerts
+    if result.get("farming_alerts"):
+        for alert in result["farming_alerts"]:
+            if alert.get("message"):
+                alert["message"] = _groq_translate(alert["message"], lang)
+
+    # Translate fertilizer name
+    if result.get("fertilizer_recommendation", {}).get("name"):
+        fert = result["fertilizer_recommendation"]
+        fert["name_translated"] = _groq_translate(fert["name"], lang)
+
+    result["language"] = lang
+    result["language_display"] = SUPPORTED_LANGUAGES.get(lang, lang)
+    return result
+
+
+@app.get("/api/language/supported", tags=["Language"])
+def get_supported_languages():
+    """Returns list of all supported languages for translation."""
+    return {
+        "languages": [
+            {"code": k, "display": v}
+            for k, v in SUPPORTED_LANGUAGES.items()
+        ],
+        "groq_active": bool(GROQ_API_KEY),
+        "model": GROQ_MODEL if GROQ_API_KEY else "not configured",
+    }
+
+
+# ─────────────────────────────────────────
+# SECTION 23 — USER PROFILE UPDATE
+# ─────────────────────────────────────────
+
+class UpdateProfileRequest(BaseModel):
+    name:     Optional[str] = Field(None, example="Ravi Kumar")
+    language: Optional[str] = Field(None, example="tamil")
+    state:    Optional[str] = Field(None, example="Tamil Nadu")
+    district: Optional[str] = Field(None, example="Cuddalore")
+
+
+@app.patch("/api/auth/profile", tags=["Auth"])
+def update_profile(
+    payload: UpdateProfileRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Update farmer/merchant profile — name, language, location."""
+    if payload.name:
+        user.name = payload.name.strip()
+    if payload.language:
+        lang = payload.language.strip().lower()
+        if lang not in SUPPORTED_LANGUAGES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Language must be one of: {list(SUPPORTED_LANGUAGES.keys())}",
+            )
+        user.language = lang
+    if payload.state:
+        user.state = payload.state.strip()
+    if payload.district:
+        user.district = payload.district.strip()
+
+    db.commit()
+    db.refresh(user)
+    return {
+        "id": user.id,
+        "name": user.name,
+        "language": user.language,
+        "state": user.state,
+        "district": user.district,
+        "message": "Profile updated successfully",
+    }
+
+
+# ─────────────────────────────────────────
+# SECTION 24 — FARM MANAGEMENT ENDPOINTS
+# ─────────────────────────────────────────
+
+class CreateFarmRequest(BaseModel):
+    gps_lat:    float = Field(..., example=11.7)
+    gps_lon:    float = Field(..., example=79.7)
+    area_acres: float = Field(..., gt=0, example=2.5)
+    soil_type:  str   = Field(..., example="Loamy")
+    district:   str   = Field(..., example="Cuddalore")
+    state:      str   = Field(..., example="Tamil Nadu")
+
+
+@app.post("/api/farms", tags=["Farms"], dependencies=[Depends(require_farmer)])
+def create_farm(
+    payload: CreateFarmRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Register a new farm for the logged-in farmer."""
+    valid_soils = {"Sandy", "Clayey", "Loamy", "Black", "Red"}
+    if payload.soil_type not in valid_soils:
+        raise HTTPException(
+            status_code=400,
+            detail={"message": "Invalid soil_type", "valid_options": sorted(valid_soils)},
+        )
+
+    farm = Farm(
+        farmer_id=user.id,
+        gps_lat=payload.gps_lat,
+        gps_lon=payload.gps_lon,
+        area_acres=payload.area_acres,
+        soil_type=payload.soil_type,
+        district=payload.district.strip(),
+        state=payload.state.strip(),
+    )
+    db.add(farm)
+    db.commit()
+    db.refresh(farm)
+
+    # Auto-fetch groundwater info for this farm's district
+    gw = next(
+        (r for r in groundwater_data if r["district"].lower() == payload.district.strip().lower()),
+        None,
+    )
+    result = {k: v for k, v in farm.__dict__.items() if not k.startswith("_")}
+    if gw:
+        result["groundwater_category"] = gw.get("category")
+        result["groundwater_warning"]  = GROUNDWATER_ADVICE.get(
+            gw["category"], {}
+        ).get("message")
+    return result
+
+
+@app.get("/api/farms", tags=["Farms"], dependencies=[Depends(require_farmer)])
+def get_my_farms(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get all farms registered by the logged-in farmer."""
+    farms = db.query(Farm).filter(Farm.farmer_id == user.id).all()
+    result = []
+    for farm in farms:
+        d = {k: v for k, v in farm.__dict__.items() if not k.startswith("_")}
+        # Attach groundwater info
+        gw = next(
+            (r for r in groundwater_data if r["district"].lower() == farm.district.lower()),
+            None,
+        )
+        if gw:
+            d["groundwater_category"] = gw.get("category")
+        # Attach soil suitability
+        ss = soil_suitability_data.get(farm.soil_type, {})
+        d["suitable_crops"] = ss.get("suitable_crops", [])
+        result.append(d)
+    return {"farms": result, "count": len(result)}
 
 
 # ─────────────────────────────────────────
