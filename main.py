@@ -2142,18 +2142,119 @@ async def detect_disease(request: Request):
             except Exception as onnx_err:
                 print(f"[WARN] ONNX inference failed: {onnx_err}")
 
-        # ── Demo mode — smart response based on image size ──
+        # ── Smart image validation — reject non-plant images ──
         img_size_kb = len(img_bytes) / 1024
-        # Rotate through demo diseases for variety
-        demo_diseases = [
-            ("Early Blight", 0.94),
-            ("Powdery Mildew", 0.87),
-            ("Late Blight", 0.91),
-            ("Healthy", 0.97),
-            ("Rust", 0.83),
+
+        # Step 1: Basic format validation
+        try:
+            from PIL import Image as PILImage
+            img_pil = PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
+            img_w, img_h = img_pil.size
+        except Exception:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "invalid_image",
+                    "message": "Could not read the uploaded file. Please upload a valid JPG or PNG image of a crop leaf.",
+                    "is_plant": False,
+                }
+            )
+
+        # Step 2: Use color analysis to detect if image contains vegetation/plant
+        # Plants have high green channel relative to red and blue
+        import numpy as _np
+        arr_check = _np.array(img_pil.resize((64, 64))).astype(float)
+        r_mean = arr_check[:, :, 0].mean()
+        g_mean = arr_check[:, :, 1].mean()
+        b_mean = arr_check[:, :, 2].mean()
+
+        # Green dominance score: green should be higher than red and blue for plants
+        green_dominance = g_mean - (r_mean + b_mean) / 2
+        # Vegetation index (simple approximation of NDVI-like score)
+        total = r_mean + g_mean + b_mean + 1e-6
+        green_ratio = g_mean / total
+
+        # Brown/yellow crops also valid — check for earth tones too
+        # Earth tones: red and green both high, blue low
+        earth_tone = (r_mean > 80 and g_mean > 60 and b_mean < 100)
+        # Very dark images (night/shadow) — reject
+        too_dark = total / 3 < 20
+        # Very bright uniform images (white background, etc) — reject
+        too_bright = total / 3 > 240
+
+        # Stricter plant detection
+        # Check if image has green vegetation (primary indicator)
+        green_vegetation = green_dominance > 5 and green_ratio > 0.30
+        # Check brown/dry crops (wheat stubble, dry leaves)
+        brown_crop = earth_tone and green_ratio > 0.20
+        # Reject clearly non-plant: blue sky, water, grey roads, white backgrounds
+        is_blue_heavy  = b_mean > g_mean + 20 and b_mean > r_mean      # sky/water
+        is_grey        = abs(r_mean - g_mean) < 15 and abs(g_mean - b_mean) < 15 and g_mean > 100  # road/concrete
+        is_white_bg    = r_mean > 200 and g_mean > 200 and b_mean > 200  # white bg
+        is_very_red    = r_mean > g_mean + 40 and r_mean > b_mean + 40  # red objects (cars etc.)
+
+        is_plant = (
+            (green_vegetation or brown_crop)
+            and not is_blue_heavy
+            and not is_grey
+            and not is_white_bg
+            and not is_very_red
+            and not too_dark
+            and not too_bright
+        )
+
+        # Step 3: File-name based hints
+        plant_keywords = [
+            "crop","plant","leaf","leaves","tomato","potato","rice","wheat",
+            "maize","cotton","onion","corn","paddy","groundnut","sugarcane",
+            "disease","blight","rust","mildew","fungal","pest","field","farm",
         ]
-        # Pick based on file size modulo for deterministic demo
-        idx = int(img_size_kb) % len(demo_diseases)
+        non_plant_keywords = [
+            "car","vehicle","dog","cat","person","human","face","selfie",
+            "road","building","sky","water","food","phone","laptop","screen",
+        ]
+        fname_lower = filename.lower()
+        has_plant_hint    = any(k in fname_lower for k in plant_keywords)
+        has_nonplant_hint = any(k in fname_lower for k in non_plant_keywords)
+
+        if has_nonplant_hint:
+            is_plant = False
+        if has_plant_hint:
+            is_plant = True
+
+        # Step 4: Reject if clearly not a plant image
+        if not is_plant:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "not_a_plant_image",
+                    "message": (
+                        "❌ This does not look like a crop or plant image. "
+                        "Please upload a clear close-up photo of a crop leaf showing disease symptoms. "
+                        "\n\nSupported crops: Tomato, Potato, Rice, Wheat, Maize, Cotton, Onion, Groundnut, Sugarcane. "
+                        "\n\nTip: Take a photo of the affected leaf in good daylight, filling the frame with the leaf."
+                    ),
+                    "is_plant": False,
+                    "detected": {
+                        "green_ratio": round(float(green_ratio), 3),
+                        "green_dominance": round(float(green_dominance), 1),
+                        "suggestion": "Take a close-up photo of the crop leaf in good daylight.",
+                    },
+                }
+            )
+
+        # ── Demo mode — only reached for valid plant images ──
+        demo_diseases = [
+            ("Early Blight",    0.94),
+            ("Powdery Mildew",  0.87),
+            ("Late Blight",     0.91),
+            ("Healthy",         0.97),
+            ("Rust",            0.83),
+            ("Leaf Spot",       0.79),
+            ("Downy Mildew",    0.85),
+        ]
+        # Deterministic pick based on image content
+        idx = int(img_size_kb + img_w + img_h) % len(demo_diseases)
         demo_disease, demo_conf = demo_diseases[idx]
         treatment_info = DISEASE_TREATMENTS.get(demo_disease, {
             "treatment": "Consult local KVK for advice.", "severity": "moderate"
@@ -2168,6 +2269,7 @@ async def detect_disease(request: Request):
             "model": "Demo",
             "mode": "demo — train YOLOv8 in Colab and save disease_model.onnx to ml_models/ for live inference",
             "image_size_kb": round(img_size_kb, 1),
+            "is_plant": True,
         }
 
     except HTTPException:
