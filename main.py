@@ -2078,209 +2078,267 @@ DISEASE_TREATMENTS: dict = {
 
 
 @app.post("/api/advisory/disease-detect", tags=["Advisory"])
-async def detect_disease(request: Request):
+@limiter.limit("10/minute")
+async def detect_disease(request: Request, file: UploadFile = File(...)):
     """
-    AI crop disease detection endpoint.
-    If ONNX model is loaded — runs real inference.
-    Otherwise — returns intelligent demo response based on filename/metadata.
+    AI crop disease detection using Groq Vision (LLaMA 3.2 Vision).
+    - Validates the image is actually a crop/plant
+    - Rejects irrelevant images (cars, people, buildings etc.)
+    - Provides detailed disease diagnosis with treatment advice
     """
-    from fastapi import UploadFile, File
-    import io
+    import base64, httpx
 
-    try:
-        form = await request.form()
-        file = form.get("file")
+    # ── Read image ──
+    img_bytes = await file.read()
+    if len(img_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Image too large. Maximum 10MB.")
 
-        if file is None:
-            raise HTTPException(status_code=400, detail="No file uploaded. Send image as 'file' field.")
+    # ── Determine media type ──
+    filename_lower = (file.filename or "").lower()
+    if filename_lower.endswith(".png"):
+        media_type = "image/png"
+    elif filename_lower.endswith(".webp"):
+        media_type = "image/webp"
+    else:
+        media_type = "image/jpeg"
 
-        img_bytes = await file.read()
-        filename = getattr(file, "filename", "crop.jpg").lower()
+    img_b64 = base64.standard_b64encode(img_bytes).decode("utf-8")
 
-        # Try ONNX inference if model available
-        onnx_path = os.path.join(ML_DIR, "disease_model.onnx")
-        if os.path.exists(onnx_path):
-            try:
-                import onnxruntime as ort
-                from PIL import Image as PILImage
-
-                session = ort.InferenceSession(onnx_path)
-                img = PILImage.open(io.BytesIO(img_bytes)).convert("RGB").resize((224, 224))
-                arr = np.array(img).astype(np.float32) / 255.0
-                arr = np.transpose(arr, (2, 0, 1))[np.newaxis, :]
-
-                input_name = session.get_inputs()[0].name
-                outputs = session.run(None, {input_name: arr})
-                probs = outputs[0][0]
-                top_idx = int(np.argmax(probs))
-                confidence = float(probs[top_idx])
-
-                # Load class names
-                classes_path = os.path.join(ML_DIR, "disease_classes.json")
-                if os.path.exists(classes_path):
-                    with open(classes_path) as cf:
-                        classes = json.load(cf)
-                    disease_name = classes[top_idx] if top_idx < len(classes) else f"Class_{top_idx}"
-                else:
-                    disease_name = f"Disease_Class_{top_idx}"
-
-                disease_clean = disease_name.replace("_", " ").replace("  ", " ").strip().title()
-                treatment_info = DISEASE_TREATMENTS.get(disease_clean, {
-                    "treatment": "Consult your local KVK (Krishi Vigyan Kendra) for treatment advice.",
-                    "severity": "unknown"
-                })
-
-                return {
-                    "disease": disease_clean,
-                    "confidence": round(confidence, 4),
-                    "confidence_percent": round(confidence * 100, 1),
-                    "treatment": treatment_info["treatment"],
-                    "severity": treatment_info["severity"],
-                    "model": "YOLOv8-ONNX",
-                    "mode": "live_inference",
-                }
-            except Exception as onnx_err:
-                print(f"[WARN] ONNX inference failed: {onnx_err}")
-
-        # ── Smart image validation — reject non-plant images ──
-        img_size_kb = len(img_bytes) / 1024
-
-        # Step 1: Basic format validation
+    # ── Use Groq Vision if API key available ──
+    if GROQ_API_KEY:
         try:
-            from PIL import Image as PILImage
-            img_pil = PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
-            img_w, img_h = img_pil.size
-        except Exception:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": "invalid_image",
-                    "message": "Could not read the uploaded file. Please upload a valid JPG or PNG image of a crop leaf.",
-                    "is_plant": False,
-                }
-            )
+            headers = {
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            }
 
-        # Step 2: Use color analysis to detect if image contains vegetation/plant
-        # Plants have high green channel relative to red and blue
-        import numpy as _np
-        arr_check = _np.array(img_pil.resize((64, 64))).astype(float)
-        r_mean = arr_check[:, :, 0].mean()
-        g_mean = arr_check[:, :, 1].mean()
-        b_mean = arr_check[:, :, 2].mean()
+            # Step 1: Check if it's a plant/crop image
+            validation_payload = {
+                "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{media_type};base64,{img_b64}"
+                                }
+                            },
+                            {
+                                "type": "text",
+                                "text": (
+                                    "Look at this image carefully. "
+                                    "Is this a photograph of a plant, crop, leaf, or agricultural produce? "
+                                    "Answer with ONLY one word: YES or NO. "
+                                    "Examples of YES: tomato plant, rice paddy, wheat field, leaf with disease spots, crop field. "
+                                    "Examples of NO: car, person, building, animal, food dish, sky, road."
+                                )
+                            }
+                        ]
+                    }
+                ],
+                "max_tokens": 10,
+                "temperature": 0.0,
+            }
 
-        # Green dominance score: green should be higher than red and blue for plants
-        green_dominance = g_mean - (r_mean + b_mean) / 2
-        # Vegetation index (simple approximation of NDVI-like score)
-        total = r_mean + g_mean + b_mean + 1e-6
-        green_ratio = g_mean / total
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                val_resp = await client.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers=headers,
+                    json=validation_payload
+                )
 
-        # Brown/yellow crops also valid — check for earth tones too
-        # Earth tones: red and green both high, blue low
-        earth_tone = (r_mean > 80 and g_mean > 60 and b_mean < 100)
-        # Very dark images (night/shadow) — reject
-        too_dark = total / 3 < 20
-        # Very bright uniform images (white background, etc) — reject
-        too_bright = total / 3 > 240
+            if val_resp.status_code == 200:
+                val_answer = val_resp.json()["choices"][0]["message"]["content"].strip().upper()
+                is_plant = "YES" in val_answer
 
-        # Stricter plant detection
-        # Check if image has green vegetation (primary indicator)
-        green_vegetation = green_dominance > 5 and green_ratio > 0.30
-        # Check brown/dry crops (wheat stubble, dry leaves)
-        brown_crop = earth_tone and green_ratio > 0.20
-        # Reject clearly non-plant: blue sky, water, grey roads, white backgrounds
-        is_blue_heavy  = b_mean > g_mean + 20 and b_mean > r_mean      # sky/water
-        is_grey        = abs(r_mean - g_mean) < 15 and abs(g_mean - b_mean) < 15 and g_mean > 100  # road/concrete
-        is_white_bg    = r_mean > 200 and g_mean > 200 and b_mean > 200  # white bg
-        is_very_red    = r_mean > g_mean + 40 and r_mean > b_mean + 40  # red objects (cars etc.)
+                if not is_plant:
+                    return {
+                        "disease": "Not a crop image",
+                        "is_plant": False,
+                        "confidence": 0,
+                        "confidence_percent": 0,
+                        "severity": "none",
+                        "treatment": (
+                            "❌ This does not appear to be a crop or plant image.\n\n"
+                            "Please upload a clear close-up photo of a crop leaf showing disease symptoms.\n\n"
+                            "Supported crops: Tomato, Potato, Rice, Wheat, Maize, Cotton, "
+                            "Onion, Groundnut, Sugarcane, Banana, Mango, Chilli.\n\n"
+                            "Tips for a good photo:\n"
+                            "• Take a close-up of the affected leaf\n"
+                            "• Use good daylight (no flash)\n"
+                            "• Fill the frame with the leaf\n"
+                            "• Show the diseased/spotted area clearly"
+                        ),
+                        "error": "not_a_plant_image",
+                        "mode": "groq_vision_validation",
+                    }
 
-        is_plant = (
-            (green_vegetation or brown_crop)
-            and not is_blue_heavy
-            and not is_grey
-            and not is_white_bg
-            and not is_very_red
-            and not too_dark
-            and not too_bright
+            # Step 2: Detailed disease diagnosis
+            diagnosis_payload = {
+                "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{media_type};base64,{img_b64}"
+                                }
+                            },
+                            {
+                                "type": "text",
+                                "text": (
+                                    "You are an expert agricultural plant pathologist. "
+                                    "Analyze this crop/plant image carefully and provide a diagnosis.\n\n"
+                                    "Respond in this EXACT JSON format (no markdown, no extra text):\n"
+                                    "{\n"
+                                    '  "disease_name": "specific disease name or Healthy",\n'
+                                    '  "crop_type": "identified crop type",\n'
+                                    '  "confidence_percent": 85,\n'
+                                    '  "severity": "none|low|moderate|high|critical",\n'
+                                    '  "symptoms_observed": "what you see in the image",\n'
+                                    '  "treatment": "detailed treatment steps",\n'
+                                    '  "prevention": "prevention advice",\n'
+                                    '  "urgency": "immediate|within 3 days|within a week|no action needed"\n'
+                                    "}"
+                                )
+                            }
+                        ]
+                    }
+                ],
+                "max_tokens": 600,
+                "temperature": 0.1,
+            }
+
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                diag_resp = await client.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers=headers,
+                    json=diagnosis_payload
+                )
+
+            if diag_resp.status_code == 200:
+                raw = diag_resp.json()["choices"][0]["message"]["content"].strip()
+                # Clean JSON
+                raw = raw.replace("```json", "").replace("```", "").strip()
+                try:
+                    result = json.loads(raw)
+                    severity = result.get("severity", "moderate")
+                    treatment_full = (
+                        f"🌿 Crop: {result.get('crop_type', 'Unknown')}\n\n"
+                        f"🔍 Symptoms: {result.get('symptoms_observed', '')}\n\n"
+                        f"💊 Treatment: {result.get('treatment', '')}\n\n"
+                        f"🛡️ Prevention: {result.get('prevention', '')}\n\n"
+                        f"⏰ Urgency: {result.get('urgency', 'Within a week')}"
+                    )
+                    return {
+                        "disease": result.get("disease_name", "Unknown"),
+                        "is_plant": True,
+                        "crop_type": result.get("crop_type", "Unknown"),
+                        "confidence": result.get("confidence_percent", 80) / 100,
+                        "confidence_percent": result.get("confidence_percent", 80),
+                        "severity": severity,
+                        "treatment": treatment_full,
+                        "symptoms": result.get("symptoms_observed", ""),
+                        "prevention": result.get("prevention", ""),
+                        "urgency": result.get("urgency", ""),
+                        "mode": "groq_vision_llama4",
+                        "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+                    }
+                except json.JSONDecodeError:
+                    # If JSON parse fails, return raw text
+                    return {
+                        "disease": "Disease detected",
+                        "is_plant": True,
+                        "confidence": 0.75,
+                        "confidence_percent": 75,
+                        "severity": "moderate",
+                        "treatment": raw,
+                        "mode": "groq_vision_raw",
+                    }
+
+        except Exception as e:
+            print(f"[WARN] Groq Vision failed: {e}")
+            # Fall through to demo mode
+
+    # ── Demo mode (no API key or Groq failed) ──────────────────────────
+    import random
+
+    # Basic color-based plant check as fallback
+    try:
+        from PIL import Image as PILImage
+        import io
+        import numpy as np
+
+        img = PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
+        img_small = img.resize((64, 64))
+        arr = np.array(img_small, dtype=float)
+        r_mean, g_mean, b_mean = arr[:,:,0].mean(), arr[:,:,1].mean(), arr[:,:,2].mean()
+
+        green_ratio    = g_mean / (r_mean + g_mean + b_mean + 1e-9)
+        green_dom      = g_mean - max(r_mean, b_mean)
+        earth_tone     = (r_mean > 80 and g_mean > 60 and b_mean < 100 and r_mean > b_mean)
+        is_blue_heavy  = b_mean > g_mean + 20 and b_mean > r_mean
+        is_grey        = abs(r_mean-g_mean)<15 and abs(g_mean-b_mean)<15 and g_mean > 100
+        is_white       = r_mean > 200 and g_mean > 200 and b_mean > 200
+        is_very_red    = r_mean > g_mean + 40 and r_mean > b_mean + 40
+        too_dark       = g_mean < 30
+        too_bright     = g_mean > 240
+
+        green_veg      = green_dom > 5 and green_ratio > 0.30
+        brown_crop     = earth_tone and green_ratio > 0.20
+
+        is_plant_img = (
+            (green_veg or brown_crop)
+            and not is_blue_heavy and not is_grey
+            and not is_white and not is_very_red
+            and not too_dark and not too_bright
         )
 
-        # Step 3: File-name based hints
-        plant_keywords = [
-            "crop","plant","leaf","leaves","tomato","potato","rice","wheat",
-            "maize","cotton","onion","corn","paddy","groundnut","sugarcane",
-            "disease","blight","rust","mildew","fungal","pest","field","farm",
-        ]
-        non_plant_keywords = [
-            "car","vehicle","dog","cat","person","human","face","selfie",
-            "road","building","sky","water","food","phone","laptop","screen",
-        ]
-        fname_lower = filename.lower()
-        has_plant_hint    = any(k in fname_lower for k in plant_keywords)
-        has_nonplant_hint = any(k in fname_lower for k in non_plant_keywords)
+        if not is_plant_img:
+            return {
+                "disease": "Not a crop image",
+                "is_plant": False,
+                "confidence": 0,
+                "confidence_percent": 0,
+                "severity": "none",
+                "treatment": (
+                    "❌ This does not appear to be a crop or plant image.\n\n"
+                    "Please upload a clear close-up photo of a crop leaf.\n\n"
+                    "Tip: Add GROQ_API_KEY to Render environment for AI-powered detection."
+                ),
+                "error": "not_a_plant_image",
+                "mode": "demo_color_check",
+            }
+    except Exception:
+        pass
 
-        if has_nonplant_hint:
-            is_plant = False
-        if has_plant_hint:
-            is_plant = True
+    # Demo disease results for valid plant images
+    demo_diseases = [
+        {"disease": "Early Blight (Alternaria solani)", "severity": "moderate",
+         "treatment": "🌿 Demo mode\n\nApply Mancozeb 75% WP @ 2g/litre. Remove infected leaves. Ensure proper spacing.\n\nAdd GROQ_API_KEY for real AI detection."},
+        {"disease": "Late Blight (Phytophthora infestans)", "severity": "high",
+         "treatment": "🌿 Demo mode\n\nApply Metalaxyl + Mancozeb. Act immediately — spreads fast in humid conditions.\n\nAdd GROQ_API_KEY for real AI detection."},
+        {"disease": "Healthy Plant", "severity": "none",
+         "treatment": "✅ Demo mode\n\nPlant appears healthy. Continue regular care and monitoring.\n\nAdd GROQ_API_KEY for real AI detection."},
+        {"disease": "Leaf Curl Virus", "severity": "high",
+         "treatment": "🌿 Demo mode\n\nControl whitefly vectors. Remove infected plants. Apply imidacloprid.\n\nAdd GROQ_API_KEY for real AI detection."},
+    ]
+    chosen = random.choice(demo_diseases)
+    return {
+        "disease": chosen["disease"],
+        "is_plant": True,
+        "confidence": round(random.uniform(0.72, 0.94), 2),
+        "confidence_percent": random.randint(72, 94),
+        "severity": chosen["severity"],
+        "treatment": chosen["treatment"],
+        "mode": "demo",
+        "note": "Add GROQ_API_KEY to Render env for real Groq Vision AI detection",
+    }
 
-        # Step 4: Reject if clearly not a plant image
-        if not is_plant:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "error": "not_a_plant_image",
-                    "message": (
-                        "❌ This does not look like a crop or plant image. "
-                        "Please upload a clear close-up photo of a crop leaf showing disease symptoms. "
-                        "\n\nSupported crops: Tomato, Potato, Rice, Wheat, Maize, Cotton, Onion, Groundnut, Sugarcane. "
-                        "\n\nTip: Take a photo of the affected leaf in good daylight, filling the frame with the leaf."
-                    ),
-                    "is_plant": False,
-                    "detected": {
-                        "green_ratio": round(float(green_ratio), 3),
-                        "green_dominance": round(float(green_dominance), 1),
-                        "suggestion": "Take a close-up photo of the crop leaf in good daylight.",
-                    },
-                }
-            )
-
-        # ── Demo mode — only reached for valid plant images ──
-        demo_diseases = [
-            ("Early Blight",    0.94),
-            ("Powdery Mildew",  0.87),
-            ("Late Blight",     0.91),
-            ("Healthy",         0.97),
-            ("Rust",            0.83),
-            ("Leaf Spot",       0.79),
-            ("Downy Mildew",    0.85),
-        ]
-        # Deterministic pick based on image content
-        idx = int(img_size_kb + img_w + img_h) % len(demo_diseases)
-        demo_disease, demo_conf = demo_diseases[idx]
-        treatment_info = DISEASE_TREATMENTS.get(demo_disease, {
-            "treatment": "Consult local KVK for advice.", "severity": "moderate"
-        })
-
-        return {
-            "disease": demo_disease,
-            "confidence": demo_conf,
-            "confidence_percent": round(demo_conf * 100, 1),
-            "treatment": treatment_info["treatment"],
-            "severity": treatment_info["severity"],
-            "model": "Demo",
-            "mode": "demo — train YOLOv8 in Colab and save disease_model.onnx to ml_models/ for live inference",
-            "image_size_kb": round(img_size_kb, 1),
-            "is_plant": True,
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Disease detection failed: {str(e)}")
-
-
-# ─────────────────────────────────────────
-# SECTION 21 — AUDIT LOG ENDPOINT
-# ─────────────────────────────────────────
 
 @app.get("/api/monitor/audit-log", tags=["Monitor"],
          dependencies=[Depends(require_monitor)])
