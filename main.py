@@ -446,16 +446,40 @@ def server_error_handler(request: Request, exc):
     return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
 
 
+# ── REPLACE your on_startup function with this ────────────────────────────────
+# Copy and paste this ENTIRE block into main.py, replacing the old on_startup
+
 @app.on_event("startup")
 def on_startup():
-    # Create all DB tables
-    Base.metadata.create_all(bind=engine)
-    # Load ML artifacts
-    load_ml_artifacts()
-    # Load government schemes
-    load_schemes()
-    # Load lookup tables (groundwater + soil suitability)
-    load_lookup_data()
+    # ── Step 1: Database ──────────────────────────────────────────────────────
+    try:
+        Base.metadata.create_all(bind=engine)
+        print("[STARTUP] ✅ Database tables created/verified")
+    except Exception as e:
+        print(f"[STARTUP] ⚠️  DB unavailable — running without DB: {e}")
+        # App still starts — DB-dependent endpoints return 503 gracefully
+
+    # ── Step 2: ML models ─────────────────────────────────────────────────────
+    try:
+        load_ml_artifacts()
+        print("[STARTUP] ✅ ML models loaded")
+    except Exception as e:
+        print(f"[STARTUP] ⚠️  ML models failed to load: {e}")
+
+    # ── Step 3: Government schemes ────────────────────────────────────────────
+    try:
+        load_schemes()
+        print("[STARTUP] ✅ Government schemes loaded")
+    except Exception as e:
+        print(f"[STARTUP] ⚠️  Schemes failed to load: {e}")
+
+    # ── Step 4: Lookup tables ─────────────────────────────────────────────────
+    try:
+        load_lookup_data()
+        print("[STARTUP] ✅ Lookup tables loaded")
+    except Exception as e:
+        print(f"[STARTUP] ⚠️  Lookup data failed to load: {e}")
+
     print("\n[STARTUP] ✅ AgriChain backend ready. Visit /docs to explore all endpoints.\n")
 
 
