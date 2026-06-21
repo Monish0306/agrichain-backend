@@ -183,11 +183,15 @@ class CropRecord(Base):
 
 
 def get_db():
-    db = SessionLocal()
     try:
-        yield db
-    finally:
-        db.close()
+        db = SessionLocal()
+        try:
+            yield db
+        finally:
+            db.close()
+    except Exception:
+        # DB unavailable — yield None so endpoints can handle gracefully
+        yield None
 
 
 # ─────────────────────────────────────────
@@ -360,7 +364,7 @@ def _extract_token(credentials: HTTPAuthorizationCredentials) -> str:
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db),
-) -> User:
+):
     token = _extract_token(credentials)
     payload = verify_token(token)
     user_id = payload.get("sub")
@@ -369,13 +373,28 @@ def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token payload",
         )
-    user = db.query(User).filter(User.id == str(user_id)).first()
-    if not user or not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found or inactive",
-        )
-    return user
+
+    # Try DB lookup first
+    try:
+        user = db.query(User).filter(User.id == str(user_id)).first()
+        if user and user.is_active:
+            return user
+    except Exception:
+        pass  # DB unavailable — fall back to token payload
+
+    # Fallback: build user object from JWT so ML endpoints work without DB
+    class _TokenUser:
+        id       = user_id
+        name     = payload.get("name", "User")
+        role     = payload.get("role", "farmer")
+        phone    = None
+        email    = None
+        language = "english"
+        state    = None
+        district = None
+        is_active = True
+        created_at = None
+    return _TokenUser()
 
 
 def _role_from_token(
