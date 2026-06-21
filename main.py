@@ -1234,6 +1234,7 @@ def predict_price(commodity: str, days: int = 7):
             for _, row in future_rows.iterrows()
         ]
 
+        future_rows = future_rows.reset_index(drop=True)
         max_row = future_rows.loc[future_rows["yhat"].idxmax()]
         max_price = float(max_row["yhat"])
         best_day = max_row["ds"].date().isoformat()
